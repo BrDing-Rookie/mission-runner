@@ -1,0 +1,29 @@
+{
+  "name": "mission-runner",
+  "version": "0.1.0",
+  "description": "OpenClaw 插件级自治任务编排层 - MVP Phase 1",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "watchdog": "tsx scripts/mission-watchdog.ts",
+    "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
+    "create-mission": "tsx scripts/mission-create.ts",
+    "typecheck": "tsc --noEmit",
+    "plan-mission": "tsx scripts/mission-plan.ts",
+    "verify-mission": "tsx scripts/mission-verify.ts",
+    "mission-plan": "tsx scripts/mission-plan.ts",
+    "mission-dispatch": "tsx scripts/mission-dispatch.ts",
+    "mission-run-action": "tsx scripts/mission-run-action.ts"
+  },
+  "dependencies": {
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

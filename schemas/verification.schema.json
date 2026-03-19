@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "verification.schema.json",
+  "title": "Verification",
+  "description": "Mission 验证结果 Schema",
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "description": "验证结果状态",
+      "enum": [
+        "PENDING",
+        "PASS",
+        "RETRYABLE_GAP",
+        "NONRETRYABLE_FAILURE",
+        "NEEDS_HUMAN_DECISION"
+      ]
+    },
+    "summary": {
+      "type": ["string", "null"],
+      "description": "验证结果摘要说明"
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "验证执行时间"
+    },
+    "checkedBy": {
+      "type": ["string", "null"],
+      "description": "验证执行者（agent/script）"
+    },
+    "criteriaResults": {
+      "type": "array",
+      "description": "各完成标准的验证结果",
+      "items": {
+        "type": "object",
+        "required": ["criterionId", "passed"],
+        "properties": {
+          "criterionId": {
+            "type": "string",
+            "description": "对应 completionCriteria 的ID"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "description": "验证通过/失败的说明"
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "description": "发现的差距/不足列表",
+      "items": {
+        "type": "object",
+        "required": ["description"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+            "default": "MEDIUM"
+          },
+          "description": {
+            "type": "string",
+            "description": "差距描述"
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "是否阻塞完成",
+            "default": false
+          }
+        }
+      }
+    },
+    "recommendedNextTasks": {
+      "type": "array",
+      "description": "建议的后续任务列表（用于 RETRYABLE_GAP 情况）",
+      "items": {
+        "type": "object",
+        "required": ["title", "type"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "建议任务标题"
+          },
+          "type": {
+            "type": "string",
+            "description": "建议任务类型"
+          },
+          "description": {
+            "type": "string",
+            "description": "建议任务描述"
+          },
+          "priority": {
+            "type": "integer",
+            "default": 10
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "description": "验证置信度 0-1",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "artifactsVerified": {
+      "type": "array",
+      "description": "已验证的产物列表",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "exists": { "type": "boolean" },
+          "valid": { "type": "boolean" },
+          "notes": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
