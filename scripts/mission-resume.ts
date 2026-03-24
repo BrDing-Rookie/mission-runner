@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'url';
-import { appendEvent, writeMission } from './lib/fs-utils.ts';
+import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { deriveMissionStatus, nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import type { Mission, Task, TaskStatus } from './lib/types.ts';
 
@@ -82,10 +82,16 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     };
 
     if (!args.dryRun) {
-      const writeOk = writeMission(args.missionsDir, updatedMission);
-      const eventOk = appendEvent(args.missionsDir, mission.missionId, event);
-      if (!writeOk || !eventOk) {
-        console.error(`[mission-resume] failed | missionId=${mission.missionId} | write=${writeOk} | event=${eventOk}`);
+      const commitOk = commitMissionUpdate({
+        missionsDir: args.missionsDir,
+        oldMission: mission,
+        newMission: updatedMission,
+        dryRun: args.dryRun,
+        source: 'resumed',
+        eventExtras: event,
+      });
+      if (!commitOk) {
+        console.error(`[mission-resume] failed | missionId=${mission.missionId}`);
         return 1;
       }
     }

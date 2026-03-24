@@ -15,6 +15,7 @@
     "mission-verify": "tsx scripts/mission-verify.ts",
     "mission-write-artifact": "tsx scripts/mission-write-artifact.ts",
     "task-update": "tsx scripts/task-update.ts",
+    "task-add": "tsx scripts/task-add.ts",
     "watchdog": "tsx scripts/mission-watchdog.ts",
     "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
     "create-mission": "tsx scripts/mission-create.ts"

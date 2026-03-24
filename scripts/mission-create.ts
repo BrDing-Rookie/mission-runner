@@ -12,6 +12,9 @@ interface CreateMissionArgs {
   owner?: MissionOwner;
   maxIterations: number;
   dryRun: boolean;
+  userMentionTag: string | null;
+  orchestratorAgentId: string | null;
+  orchestratorMentionTag: string | null;
 }
 
 function parseArgs(argv: string[]): CreateMissionArgs {
@@ -21,6 +24,9 @@ function parseArgs(argv: string[]): CreateMissionArgs {
     goal: '',
     maxIterations: 6,
     dryRun: false,
+    userMentionTag: null,
+    orchestratorAgentId: null,
+    orchestratorMentionTag: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -73,6 +79,24 @@ function parseArgs(argv: string[]): CreateMissionArgs {
           index += 1;
         }
         break;
+      case '--user-mention-tag':
+        if (next) {
+          args.userMentionTag = next;
+          index += 1;
+        }
+        break;
+      case '--orchestrator-agent-id':
+        if (next) {
+          args.orchestratorAgentId = next;
+          index += 1;
+        }
+        break;
+      case '--orchestrator-mention-tag':
+        if (next) {
+          args.orchestratorMentionTag = next;
+          index += 1;
+        }
+        break;
       case '--max-iterations': {
         const value = Number(next);
         if (Number.isFinite(value) && value >= 1) {
@@ -118,12 +142,25 @@ function nextMissionId(missionsDir: string, now = new Date()): string {
 }
 
 function buildMission(missionId: string, args: CreateMissionArgs, nowIso: string): Mission {
+  // 将 userMentionTag 写入 owner
+  const owner: MissionOwner | undefined = args.owner
+    ? {
+        ...args.owner,
+        ...(args.userMentionTag ? { userMentionTag: args.userMentionTag } : {}),
+      }
+    : undefined;
+
+  // 将 orchestrator 信息写入 metadata
+  const metadata: Record<string, unknown> = {};
+  if (args.orchestratorAgentId) metadata.orchestratorAgentId = args.orchestratorAgentId;
+  if (args.orchestratorMentionTag) metadata.orchestratorMentionTag = args.orchestratorMentionTag;
+
   return {
     missionId,
     title: args.title.trim(),
     goal: args.goal.trim(),
     status: 'CREATED',
-    owner: args.owner,
+    owner,
     createdAt: nowIso,
     updatedAt: nowIso,
     lastProgressAt: nowIso,
@@ -152,7 +189,7 @@ function buildMission(missionId: string, args: CreateMissionArgs, nowIso: string
       notifiedEscalation: false,
       userUpdated: false,
     },
-    metadata: {},
+    metadata,
   };
 }
 
@@ -172,6 +209,8 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     }
 
     initMissionDirectory(args.missionsDir, missionId);
+    // 有意不使用 commitMissionUpdate()：创建者自己知道在创建，无需推送通知。
+    // 后续状态变更（如 CREATED→PLANNED）会由 commitMissionUpdate 触发通知。
     const writeOk = writeMission(args.missionsDir, mission);
     const eventOk = appendEvent(args.missionsDir, missionId, {
       type: 'mission_created',

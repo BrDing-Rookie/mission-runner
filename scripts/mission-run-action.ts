@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'url';
-import { appendEvent, writeMission } from './lib/fs-utils.ts';
+import { appendEvent } from './lib/fs-utils.ts';
+import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { nowIso, parseMissionActionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import { buildMissionNotificationPayload, resolveMissionNotificationAdapter } from './lib/mission-notification.ts';
 import { reconcileBackgroundMission } from './mission-reconcile-background.ts';
@@ -31,9 +32,15 @@ function retryFailedTasks(missionsDir: string, missionId: string, dryRun: boolea
   const changed = retriedTaskIds.length > 0;
   const updatedMission = changed ? { ...mission, status: 'RUNNING' as const, tasks, updatedAt: timestamp, lastProgressAt: timestamp, nextWakeAt: timestamp } : mission;
   if (!dryRun && changed) {
-    const writeOk = writeMission(missionsDir, updatedMission);
-    const eventOk = appendEvent(missionsDir, missionId, { type: 'mission_retried', retriedTaskIds, statusFrom: mission.status, statusTo: updatedMission.status, dryRun });
-    if (!writeOk || !eventOk) throw new Error(`Failed to persist retry action for missionId=${missionId} | write=${writeOk} | event=${eventOk}`);
+    const commitOk = commitMissionUpdate({
+      missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
+      dryRun,
+      source: 'retried',
+      eventExtras: { retriedTaskIds },
+    });
+    if (!commitOk) throw new Error(`Failed to persist retry action for missionId=${missionId}`);
   }
   return { missionId, missionStatus: updatedMission.status, retriedTaskIds, changed, success: true, dryRun };
 }
@@ -45,9 +52,15 @@ function setEscalationState(missionsDir: string, missionId: string, dryRun: bool
   const changed = !alreadySame;
   const updatedMission = changed ? { ...mission, status: 'ESCALATED' as const, escalation: { level, reason, escalatedAt: timestamp }, updatedAt: timestamp, lastProgressAt: timestamp, nextWakeAt: null } : mission;
   if (!dryRun && changed) {
-    const writeOk = writeMission(missionsDir, updatedMission);
-    const eventOk = appendEvent(missionsDir, missionId, { type: 'mission_escalated', level, reason, statusFrom: mission.status, statusTo: updatedMission.status, dryRun });
-    if (!writeOk || !eventOk) throw new Error(`Failed to persist escalation for missionId=${missionId} | write=${writeOk} | event=${eventOk}`);
+    const commitOk = commitMissionUpdate({
+      missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
+      dryRun,
+      source: 'escalated',
+      eventExtras: { level, reason },
+    });
+    if (!commitOk) throw new Error(`Failed to persist escalation for missionId=${missionId}`);
   }
   return { missionId, missionStatus: updatedMission.status, changed, success: true, dryRun, escalationReason: reason };
 }
@@ -85,9 +98,16 @@ function markNotificationFlag(
       }
     : mission;
   if (!dryRun && changed) {
-    const writeOk = writeMission(missionsDir, updatedMission);
-    const eventOk = appendEvent(missionsDir, missionId, { type: eventType, status: mission.status, flag, dryRun, delivery: delivery.metadata });
-    if (!writeOk || !eventOk) throw new Error(`Failed to persist notification mark for missionId=${missionId} | write=${writeOk} | event=${eventOk}`);
+    const commitOk = commitMissionUpdate({
+      missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
+      dryRun,
+      source: 'notification',
+      skipNotification: true, // 避免递归：此处本身就是通知动作
+      eventExtras: { type: eventType, status: mission.status, flag, dryRun, delivery: delivery.metadata },
+    });
+    if (!commitOk) throw new Error(`Failed to persist notification mark for missionId=${missionId}`);
   }
   return { missionId, missionStatus: updatedMission.status, changed, success: delivery.delivered, dryRun, flag, delivery: delivery.metadata };
 }

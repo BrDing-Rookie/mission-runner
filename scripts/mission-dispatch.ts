@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'url';
-import { appendEvent, writeMission } from './lib/fs-utils.ts';
+import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { deriveMissionStatus, nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
 
@@ -72,28 +72,32 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       backgroundProcesses,
     };
 
-    const event = {
-      type: 'mission_dispatched',
-      statusFrom: mission.status,
-      statusTo: updatedMission.status,
+    // statusFrom, statusTo, dryRun are already set by commitMissionUpdate internally;
+    // only include dispatch-specific fields in eventExtras to avoid duplication.
+    const eventExtras = {
       startedTaskIds,
       runningTaskIds,
       backgroundTaskIds,
       backgroundProcessCount: backgroundProcesses.length,
-      dryRun: args.dryRun,
     };
 
     if (!args.dryRun) {
-      const writeOk = writeMission(args.missionsDir, updatedMission);
-      const eventOk = appendEvent(args.missionsDir, mission.missionId, event);
-      if (!writeOk || !eventOk) {
-        console.error(`[mission-dispatch] failed | missionId=${mission.missionId} | write=${writeOk} | event=${eventOk}`);
+      const commitOk = commitMissionUpdate({
+        missionsDir: args.missionsDir,
+        oldMission: mission,
+        newMission: updatedMission,
+        dryRun: args.dryRun,
+        source: 'dispatched',
+        eventExtras,
+      });
+      if (!commitOk) {
+        console.error(`[mission-dispatch] failed | missionId=${mission.missionId}`);
         return 1;
       }
     }
 
     if (args.dryRun) {
-      console.log(JSON.stringify({ missionId: mission.missionId, event, updatedMission }, null, 2));
+      console.log(JSON.stringify({ missionId: mission.missionId, eventExtras, updatedMission }, null, 2));
       return 0;
     }
 

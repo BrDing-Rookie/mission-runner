@@ -13,7 +13,7 @@
  */
 
 import { pathToFileURL } from 'url';
-import { appendEvent, writeMission } from './lib/fs-utils.ts';
+import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { deriveMissionStatus, nowIso, requireMission } from './lib/mission-helpers.ts';
 import type { Mission, Task, TaskStatus } from './lib/types.ts';
 
@@ -137,6 +137,28 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
   const updatedTasks = [...tasks];
   updatedTasks[taskIndex] = updatedTask;
 
+  // 联动解锁：当 task 完成时，检查下游 PENDING tasks 的依赖是否满足
+  const DEPENDENCY_DONE_STATUSES: Set<TaskStatus> = new Set(['COMPLETED', 'SKIPPED']);
+  const unlockedTaskIds: string[] = [];
+
+  if (DEPENDENCY_DONE_STATUSES.has(args.status)) {
+    const taskMap = new Map(updatedTasks.map(t => [t.taskId, t]));
+    for (let i = 0; i < updatedTasks.length; i++) {
+      const t = updatedTasks[i];
+      if (t.status !== 'PENDING') continue;
+      const deps = t.dependsOn ?? [];
+      const allSatisfied = deps.every(depId => {
+        const dep = taskMap.get(depId);
+        return dep && DEPENDENCY_DONE_STATUSES.has(dep.status);
+      });
+      if (allSatisfied) {
+        updatedTasks[i] = { ...t, status: 'READY' as TaskStatus };
+        taskMap.set(t.taskId, updatedTasks[i]);
+        unlockedTaskIds.push(t.taskId);
+      }
+    }
+  }
+
   // Derive mission status
   const newMissionStatus = deriveMissionStatus(mission.status, updatedTasks);
 
@@ -149,21 +171,27 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
   };
 
   if (!args.dryRun) {
-    const writeOk = writeMission(args.missionsDir, updatedMission);
-    const eventOk = appendEvent(args.missionsDir, args.missionId, {
-      type: 'task_status_updated',
-      taskId: args.taskId,
-      statusFrom: task.status,
-      statusTo: args.status,
-      missionStatusFrom: mission.status,
-      missionStatusTo: newMissionStatus,
-      summary: args.summary || null,
-      artifacts: args.artifacts,
-      reporter: 'agent',
+    const commitOk = commitMissionUpdate({
+      missionsDir: args.missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
+      dryRun: args.dryRun,
+      source: 'task_status_updated',
+      eventExtras: {
+        taskId: args.taskId,
+        statusFrom: task.status,
+        statusTo: args.status,
+        missionStatusFrom: mission.status,
+        missionStatusTo: newMissionStatus,
+        summary: args.summary || null,
+        artifacts: args.artifacts,
+        unlockedTaskIds,
+        reporter: 'agent',
+      },
     });
 
-    if (!writeOk || !eventOk) {
-      throw new Error(`Failed to persist task update: write=${writeOk} event=${eventOk}`);
+    if (!commitOk) {
+      throw new Error(`Failed to persist task update for missionId=${args.missionId}`);
     }
   }
 

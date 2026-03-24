@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { appendEvent, readMission, safeWriteFile, writeMission } from './fs-utils.ts';
+import { commitMissionUpdate } from './mission-commit.ts';
 import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskStatus, TaskType, VerificationStatus } from './types.ts';
 
 export interface MissionCliArgs { missionsDir: string; missionId: string; dryRun: boolean; }
@@ -56,7 +57,22 @@ export function formatPlanMarkdown(mission: Mission, plan: PlanDraft): string {
   const lines: string[] = [`# Plan for ${mission.missionId}`, '', '## Title', mission.title, '', '## Goal', mission.goal, '', '## Summary', plan.summary, '', '## Completion Criteria', ...plan.completionCriteria.map((c, i) => `${i + 1}. [ ] ${c.description}`), '', '## Tasks', ...plan.tasks.map((task, i) => `${i + 1}. **${task.taskId}** (${task.type}) - ${task.title}${task.dependsOn?.length ? ` | dependsOn: ${task.dependsOn.join(', ')}` : ''}`), '', '## Risk Policy', `- autoAllowed: ${(plan.riskPolicy.autoAllowed ?? []).join(', ') || 'none'}`, `- askOnce: ${(plan.riskPolicy.askOnce ?? []).join(', ') || 'none'}`, `- mustConfirm: ${(plan.riskPolicy.mustConfirm ?? []).join(', ') || 'none'}`];
   return lines.join('\n') + '\n';
 }
-export function persistMissionUpdate(missionsDir: string, mission: Mission, event: Record<string, unknown>, artifactWrites?: Array<{ path: string; content: string }>) {
+export function persistMissionUpdate(missionsDir: string, mission: Mission, event: Record<string, unknown>, artifactWrites?: Array<{ path: string; content: string }>, oldMission?: Mission) {
+  if (oldMission) {
+    // 使用集中式提交层（含自动通知）
+    const ok = commitMissionUpdate({
+      missionsDir,
+      oldMission,
+      newMission: mission,
+      dryRun: false,
+      source: (event.type as string | undefined)?.replace(/^mission_/, '') ?? 'update',
+      eventExtras: event,
+      artifactWrites,
+    });
+    return { writeOk: ok, eventOk: ok, artifactsOk: ok };
+  }
+  // 向后兼容：无 oldMission 时走原有逻辑（跳过通知检测）
+  console.warn('[persistMissionUpdate] oldMission not provided, skipping notification detection');
   const writeOk = writeMission(missionsDir, mission); const eventOk = appendEvent(missionsDir, mission.missionId, event); const artifactsOk = (artifactWrites ?? []).every((a) => safeWriteFile(a.path, a.content));
   return { writeOk, eventOk, artifactsOk };
 }

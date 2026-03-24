@@ -1,6 +1,14 @@
-import type { Mission } from './types.ts';
+import { execSync } from 'child_process';
+import { escapeShellArg } from './shell-utils.ts';
+import type { Mission, MissionStatus } from './types.ts';
 
-export type MissionNotificationKind = 'complete' | 'escalation';
+export type MissionNotificationKind =
+  | 'complete'
+  | 'escalation'
+  | 'status_transition'
+  | 'task_dispatched'
+  | 'task_completed'
+  | 'task_failed';
 
 export interface MissionNotificationPayload {
   kind: MissionNotificationKind;
@@ -8,6 +16,11 @@ export interface MissionNotificationPayload {
   title: string;
   status: Mission['status'];
   content: string;
+  mentions?: string[];              // @mention 标记列表
+  transitionFrom?: MissionStatus;   // mission 级状态变更：来源状态
+  transitionTo?: MissionStatus;     // mission 级状态变更：目标状态
+  taskId?: string;                  // 关联的 task
+  source?: string;                  // 触发来源标识
   metadata?: Record<string, unknown>;
 }
 
@@ -91,6 +104,53 @@ export class DiscordMissionNotificationAdapter implements MissionNotificationAda
   }
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+export class OpenClawMissionNotificationAdapter implements MissionNotificationAdapter {
+  readonly name = 'openclaw';
+
+  send(payload: MissionNotificationPayload, context: { mission: Mission; dryRun: boolean }): MissionNotificationResult {
+    const owner = context.mission.owner;
+    if (!owner?.channel || !owner?.chatId) {
+      return new ConsoleMissionNotificationAdapter().send(payload, context);
+    }
+
+    if (context.dryRun) {
+      return { delivered: false, metadata: { adapter: this.name, deliveredAt: nowIso(), dryRun: true } };
+    }
+
+    // 消息内容 + @mention 拼接
+    const mentionSuffix = (payload.mentions ?? []).length > 0
+      ? '\n' + payload.mentions!.join(' ')
+      : '';
+    const fullContent = payload.content + mentionSuffix;
+
+    try {
+      execSync(
+        `openclaw message send --channel ${escapeShellArg(owner.channel)} --to ${escapeShellArg(owner.chatId)} --message ${escapeShellArg(fullContent)}`,
+        { timeout: 10_000, stdio: 'pipe' }
+      );
+      return {
+        delivered: true,
+        metadata: {
+          adapter: this.name,
+          target: `${owner.channel}:${owner.chatId}`,
+          mentions: payload.mentions,
+          deliveredAt: nowIso(),
+        },
+      };
+    } catch (err) {
+      console.error(`[mission-notify:openclaw] failed to send: ${(err as Error).message}`);
+      return {
+        delivered: false,
+        metadata: { adapter: this.name, deliveredAt: nowIso(), error: (err as Error).message },
+      };
+    }
+  }
+}
+
 export interface MissionNotificationSenderOptions {
   adapter?: string;
   discordChannel?: string;
@@ -101,6 +161,7 @@ export function resolveMissionNotificationAdapter(options: MissionNotificationSe
   const adapterName = (options.adapter ?? process.env.MISSION_NOTIFICATION_ADAPTER ?? 'console').trim().toLowerCase();
 
   if (adapterName === 'fake') return new FakeMissionNotificationAdapter();
+  if (adapterName === 'openclaw') return new OpenClawMissionNotificationAdapter();
   if (adapterName === 'discord') {
     const channel = options.discordChannel ?? process.env.MISSION_NOTIFICATION_DISCORD_CHANNEL;
     if (!channel) {

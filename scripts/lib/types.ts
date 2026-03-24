@@ -79,8 +79,9 @@ export type EscalationLevel = 'INFO' | 'WARNING' | 'CRITICAL' | null;
 export interface MissionOwner {
   sessionKey: string;
   channel?: 'discord' | 'slack' | 'cli' | 'web' | 'api';
-  chatId?: string;
+  chatId?: string;               // 群聊 ID（Discord guild/channel, Slack channel 等）
   requestMessageId?: string;
+  userMentionTag?: string;        // 用户在渠道内的 @mention 标记
 }
 
 export interface CompletionCriterion {
@@ -174,6 +175,7 @@ export interface MissionFlags {
   notifiedComplete?: boolean;
   notifiedEscalation?: boolean;
   userUpdated?: boolean;
+  notifiedTransitions?: Record<string, boolean>;  // 幂等去重：key 如 "PLANNED->RUNNING" 或 "task:T1:READY->RUNNING"
 }
 
 /**

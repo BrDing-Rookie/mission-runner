@@ -3,7 +3,9 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
-import { appendEvent, readMission, safeWriteFile, writeMission } from './lib/fs-utils.ts';
+import { readMission } from './lib/fs-utils.ts';
+import { discoverAgents, matchAgentForTask } from './lib/mission-agent-discovery.ts';
+import { commitMissionUpdate } from './lib/mission-commit.ts';
 import type { CompletionCriterion, Mission, Task, TaskType } from './lib/types.ts';
 
 interface PlanArgs {
@@ -465,8 +467,25 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     const customTasks = customTaskInput ? normalizeCustomTasks(customTaskInput) : null;
     const customCriteria = parseCustomCriteria(args);
     const output = buildPlannedOutput(mission, customTasks, customCriteria, args.parallel);
+
+    // Agent 发现 + 分配
+    const agents = discoverAgents({
+      channel: mission.owner?.channel ?? '',
+      chatId: mission.owner?.chatId ?? '',
+    });
+    for (const task of output.tasks) {
+      const matched = matchAgentForTask(task, agents);
+      if (matched) {
+        task.agent = matched.agentId;
+        task.config = { ...task.config, agentMentionTag: matched.mentionTag, agentName: matched.name };
+      }
+    }
+
     const nowIso = new Date().toISOString();
     const nextWakeAt = mission.nextWakeAt ?? nowIso;
+
+    // 记录 orchestrator 信息到 metadata（当前 Agent 即是 orchestrator）
+    const existingMetadata = mission.metadata ?? {};
     const updatedMission: Mission = {
       ...mission,
       status: 'PLANNED',
@@ -484,6 +503,10 @@ export function main(argv: string[] = process.argv.slice(2)): number {
           generatedAt: nowIso,
         },
       ],
+      metadata: {
+        ...existingMetadata,
+        // 保留已有 orchestrator 信息（由 mission-create 写入）
+      },
     };
 
     const missionDir = join(args.missionsDir, mission.missionId);
@@ -494,19 +517,23 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       return 0;
     }
 
-    const planOk = safeWriteFile(planPath, output.planMarkdown);
-    const missionOk = writeMission(args.missionsDir, updatedMission);
-    const eventOk = appendEvent(args.missionsDir, mission.missionId, {
-      type: 'mission_planned',
-      statusFrom: mission.status,
-      statusTo: updatedMission.status,
-      taskCount: output.tasks.length,
-      completionCriteriaCount: output.completionCriteria.length,
-      artifactPath: 'plan.md',
+    const commitOk = commitMissionUpdate({
+      missionsDir: args.missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
+      dryRun: args.dryRun,
+      source: 'planned',
+      eventExtras: {
+        taskCount: output.tasks.length,
+        completionCriteriaCount: output.completionCriteria.length,
+        artifactPath: 'plan.md',
+        agentsDiscovered: agents.length,
+      },
+      artifactWrites: [{ path: planPath, content: output.planMarkdown }],
     });
 
-    if (!planOk || !missionOk || !eventOk) {
-      console.error(`[mission-plan] failed | missionId=${mission.missionId} | plan=${planOk} | mission=${missionOk} | event=${eventOk}`);
+    if (!commitOk) {
+      console.error(`[mission-plan] failed | missionId=${mission.missionId}`);
       return 1;
     }
 

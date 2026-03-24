@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'url';
-import { appendEvent, writeMission } from './lib/fs-utils.ts';
+import { commitMissionUpdate as commitUpdate } from './lib/mission-commit.ts';
 import { nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
 
@@ -116,20 +116,22 @@ export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): Recon
     : mission;
 
   if (!args.dryRun && changed) {
-    const writeOk = writeMission(args.missionsDir, updatedMission);
-    const eventOk = appendEvent(args.missionsDir, mission.missionId, {
-      type: 'mission_background_reconciled',
-      statusFrom: mission.status,
-      statusTo: updatedMission.status,
-      changed,
-      progressed,
-      reconciledTaskIds,
-      completedTaskIds,
-      failedTaskIds,
+    const commitOk = commitUpdate({
+      missionsDir: args.missionsDir,
+      oldMission: mission,
+      newMission: updatedMission,
       dryRun: args.dryRun,
+      source: 'background_reconciled',
+      eventExtras: {
+        changed,
+        progressed,
+        reconciledTaskIds,
+        completedTaskIds,
+        failedTaskIds,
+      },
     });
-    if (!writeOk || !eventOk) {
-      throw new Error(`Failed to persist reconcile result for missionId=${mission.missionId} | write=${writeOk} | event=${eventOk}`);
+    if (!commitOk) {
+      throw new Error(`Failed to persist reconcile result for missionId=${mission.missionId}`);
     }
   }
 

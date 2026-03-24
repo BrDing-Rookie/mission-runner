@@ -163,7 +163,7 @@ export function runVerify(args: MissionCliArgs): VerifyResult {
     missionStatus: updated.status,
     gaps,
     criteriaResults: criterionResults,
-  }, [{ path: verificationFile, content: verificationMarkdown }]);
+  }, [{ path: verificationFile, content: verificationMarkdown }], mission);
 
   if (!persistResult.writeOk || !persistResult.eventOk || !persistResult.artifactsOk) {
     throw new Error(`Failed to persist verification: write=${persistResult.writeOk} event=${persistResult.eventOk} artifacts=${persistResult.artifactsOk}`);
