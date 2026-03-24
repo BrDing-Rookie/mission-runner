@@ -149,11 +149,18 @@ export interface ActiveSession {
   purpose?: string;
 }
 
+export interface VerificationCriterionResult {
+  criterionId: string;
+  passed: boolean;
+  reason?: string | null;
+}
+
 export interface Verification {
   status: VerificationStatus;
   lastCheckedAt?: string | null;
   gaps?: string[];
   summary?: string | null;
+  criteriaResults?: VerificationCriterionResult[];
 }
 
 export interface Escalation {

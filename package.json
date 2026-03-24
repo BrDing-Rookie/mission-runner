@@ -4,16 +4,20 @@
   "description": "OpenClaw 插件级自治任务编排层 - MVP Phase 1",
   "type": "module",
   "scripts": {
-    "build": "tsc",
-    "watchdog": "tsx scripts/mission-watchdog.ts",
-    "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
-    "create-mission": "tsx scripts/mission-create.ts",
     "typecheck": "tsc --noEmit",
-    "plan-mission": "tsx scripts/mission-plan.ts",
-    "verify-mission": "tsx scripts/mission-verify.ts",
+    "test": "node --test scripts/*.test.ts",
+    "build": "tsc",
+    "mission-start": "tsx scripts/mission-start.ts",
+    "mission-orchestrate": "tsx scripts/mission-orchestrate.ts",
+    "mission-run-action": "tsx scripts/mission-run-action.ts",
     "mission-plan": "tsx scripts/mission-plan.ts",
     "mission-dispatch": "tsx scripts/mission-dispatch.ts",
-    "mission-run-action": "tsx scripts/mission-run-action.ts"
+    "mission-verify": "tsx scripts/mission-verify.ts",
+    "mission-write-artifact": "tsx scripts/mission-write-artifact.ts",
+    "task-update": "tsx scripts/task-update.ts",
+    "watchdog": "tsx scripts/mission-watchdog.ts",
+    "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
+    "create-mission": "tsx scripts/mission-create.ts"
   },
   "dependencies": {
     "zod": "^3.22.4"

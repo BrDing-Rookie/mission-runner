@@ -1,3 +1,12 @@
+---
+name: mission-controller
+description: '自治任务编排核心技能。协调 planner、verifier、recovery 形成 mission 生命周期闭环。用于创建、规划、派发、监控、验证和恢复长期任务。触发时机：需要自治任务编排、mission 管理、长期任务推进时使用。'
+metadata:
+  {
+    "openclaw": { "emoji": "🎯", "requires": { "anyBins": ["node", "tsx"] } },
+  }
+---
+
 # Skill: mission-controller
 
 自治任务编排核心技能 —— 协调 planner、verifier、recovery 形成执行闭环。

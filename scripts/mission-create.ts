@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import { appendEvent, initMissionDirectory, listMissionIds, writeMission } from './lib/fs-utils.ts';
 import type { Mission, MissionOwner } from './lib/types.ts';
 
@@ -155,9 +156,9 @@ function buildMission(missionId: string, args: CreateMissionArgs, nowIso: string
   };
 }
 
-function main(): number {
+export function main(argv: string[] = process.argv.slice(2)): number {
   try {
-    const args = parseArgs(process.argv.slice(2));
+    const args = parseArgs(argv);
     assertRequired(args);
 
     const nowIso = new Date().toISOString();
@@ -195,4 +196,9 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+const isEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  process.exitCode = main();
+}

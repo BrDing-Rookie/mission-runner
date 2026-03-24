@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from 'url';
 import { appendEvent, writeMission } from './lib/fs-utils.ts';
-import { nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
+import { deriveMissionStatus, nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
 
 function isReady(task: Task): boolean {
@@ -12,19 +13,9 @@ function isBackgroundCandidate(task: Task): boolean {
   return ['code', 'test', 'deploy', 'external_wait'].includes(task.type);
 }
 
-function deriveMissionStatus(originalStatus: Mission['status'], tasks: Task[]): Mission['status'] {
-  if (tasks.some((task) => task.status === 'WAITING_BACKGROUND')) {
-    return 'WAITING_BACKGROUND';
-  }
-  if (tasks.some((task) => task.status === 'RUNNING')) {
-    return 'RUNNING';
-  }
-  return originalStatus;
-}
-
-function main(): number {
+export function main(argv: string[] = process.argv.slice(2)): number {
   try {
-    const args = parseMissionCliArgs(process.argv.slice(2));
+    const args = parseMissionCliArgs(argv);
     const mission = requireMission(args);
 
     const readyTasks = (mission.tasks ?? []).filter(isReady);
@@ -115,4 +106,9 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+const isEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  process.exitCode = main();
+}

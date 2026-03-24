@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'fs';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import { appendEvent, readMission, safeWriteFile, writeMission } from './lib/fs-utils.ts';
 import type { CompletionCriterion, Mission, Task, TaskType } from './lib/types.ts';
 
@@ -8,6 +10,11 @@ interface PlanArgs {
   missionsDir: string;
   missionId: string;
   dryRun: boolean;
+  tasksFile: string | null;
+  tasksJson: string | null;
+  criteriaFile: string | null;
+  criteriaJson: string | null;
+  parallel: number | null;
 }
 
 interface PlannedOutput {
@@ -16,11 +23,18 @@ interface PlannedOutput {
   planMarkdown: string;
 }
 
+type TaskInput = Omit<Task, 'status'> & { status?: Task['status'] };
+
 function parseArgs(argv: string[]): PlanArgs {
   const args: PlanArgs = {
     missionsDir: './missions',
     missionId: '',
     dryRun: false,
+    tasksFile: null,
+    tasksJson: null,
+    criteriaFile: null,
+    criteriaJson: null,
+    parallel: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -43,6 +57,38 @@ function parseArgs(argv: string[]): PlanArgs {
       case '--dry-run':
         args.dryRun = true;
         break;
+      case '--tasks-file':
+        if (next) {
+          args.tasksFile = next;
+          index += 1;
+        }
+        break;
+      case '--tasks-json':
+        if (next) {
+          args.tasksJson = next;
+          index += 1;
+        }
+        break;
+      case '--criteria-file':
+        if (next) {
+          args.criteriaFile = next;
+          index += 1;
+        }
+        break;
+      case '--criteria-json':
+        if (next) {
+          args.criteriaJson = next;
+          index += 1;
+        }
+        break;
+      case '--parallel': {
+        const value = Number(next);
+        if (Number.isInteger(value) && value >= 1) {
+          args.parallel = value;
+          index += 1;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -54,6 +100,15 @@ function parseArgs(argv: string[]): PlanArgs {
 function assertRequired(args: PlanArgs): void {
   if (!args.missionId.trim()) {
     throw new Error('Missing required --mission-id');
+  }
+
+  const customTaskSources = [args.tasksFile, args.tasksJson, args.parallel !== null ? 'parallel' : null].filter(Boolean).length;
+  if (customTaskSources > 1) {
+    throw new Error('Use only one of --tasks-file, --tasks-json, or --parallel');
+  }
+
+  if (args.criteriaFile && args.criteriaJson) {
+    throw new Error('Use either --criteria-file or --criteria-json, not both');
   }
 }
 
@@ -85,7 +140,226 @@ function createTask(taskId: string, title: string, type: TaskType, description: 
   };
 }
 
-function inferWorkstream(goal: string): { primaryType: TaskType; executionTitle: string; executionDescription: string } {
+function parseCustomTasks(args: PlanArgs): TaskInput[] | null {
+  const raw = args.tasksJson
+    ? args.tasksJson
+    : args.tasksFile
+      ? readFileSync(args.tasksFile, 'utf-8')
+      : null;
+
+  if (!raw) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse custom tasks JSON: ${message}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('Custom tasks must be a JSON array');
+  }
+
+  return parsed as TaskInput[];
+}
+
+function defaultCompletionCriteria(): CompletionCriterion[] {
+  return [
+    {
+      id: 'criterion-plan-exists',
+      description: 'mission 已生成 plan.md，包含任务拆解、完成标准和下一步。',
+      required: true,
+      verified: false,
+    },
+    {
+      id: 'criterion-primary-output',
+      description: '至少一个主任务产出与 mission 目标直接相关的交付物。',
+      required: true,
+      verified: false,
+    },
+    {
+      id: 'criterion-verification-ready',
+      description: '存在可执行的验证任务或验收标准，能阻止“伪完成”。',
+      required: true,
+      verified: false,
+    },
+  ];
+}
+
+function parseCustomCriteria(args: PlanArgs): CompletionCriterion[] | null {
+  const raw = args.criteriaJson
+    ? args.criteriaJson
+    : args.criteriaFile
+      ? readFileSync(args.criteriaFile, 'utf-8')
+      : null;
+
+  if (!raw) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse custom criteria JSON: ${message}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('Custom completion criteria must be a JSON array');
+  }
+
+  const ids = new Set<string>();
+  return parsed.map((item, index): CompletionCriterion => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`Custom completion criterion at index ${index} must be an object`);
+    }
+
+    const id = 'id' in item && typeof item.id === 'string' ? item.id.trim() : '';
+    const description = 'description' in item && typeof item.description === 'string' ? item.description.trim() : '';
+
+    if (!id) {
+      throw new Error(`Custom completion criterion at index ${index} is missing id`);
+    }
+
+    if (!description) {
+      throw new Error(`Custom completion criterion ${id} is missing description`);
+    }
+
+    if (ids.has(id)) {
+      throw new Error(`Custom completion criteria contain duplicate id: ${id}`);
+    }
+    ids.add(id);
+
+    return {
+      ...(item as CompletionCriterion),
+      id,
+      description,
+    };
+  });
+}
+
+function assertAcyclicTaskGraph(tasks: Task[]): void {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const taskMap = new Map(tasks.map((task) => [task.taskId, task]));
+
+  const visit = (taskId: string, path: string[]): void => {
+    if (visited.has(taskId)) {
+      return;
+    }
+
+    if (visiting.has(taskId)) {
+      const cycleStart = path.indexOf(taskId);
+      const cyclePath = [...path.slice(cycleStart), taskId].join(' -> ');
+      throw new Error(`Custom tasks contain cyclic dependency: ${cyclePath}`);
+    }
+
+    visiting.add(taskId);
+    const task = taskMap.get(taskId);
+    for (const dependencyId of task?.dependsOn ?? []) {
+      visit(dependencyId, [...path, taskId]);
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+
+  for (const task of tasks) {
+    visit(task.taskId, []);
+  }
+}
+
+function normalizeCustomTasks(tasks: TaskInput[]): Task[] {
+  if (tasks.length === 0) {
+    throw new Error('Custom tasks must contain at least one task');
+  }
+
+  const normalized = tasks.map((task, index): Task => {
+    if (!task || typeof task !== 'object') {
+      throw new Error(`Custom task at index ${index} must be an object`);
+    }
+    if (!task.taskId?.trim()) {
+      throw new Error(`Custom task at index ${index} is missing taskId`);
+    }
+    if (!task.title?.trim()) {
+      throw new Error(`Custom task ${task.taskId} is missing title`);
+    }
+    if (!task.type) {
+      throw new Error(`Custom task ${task.taskId} is missing type`);
+    }
+
+    const dependsOn = Array.isArray(task.dependsOn)
+      ? task.dependsOn.map((dependencyId) => {
+          if (typeof dependencyId !== 'string' || !dependencyId.trim()) {
+            throw new Error(`Custom task ${task.taskId} has an invalid dependsOn entry`);
+          }
+          return dependencyId;
+        })
+      : [];
+
+    return {
+      ...task,
+      taskId: task.taskId.trim(),
+      title: task.title.trim(),
+      description: task.description,
+      dependsOn,
+      status: dependsOn.length > 0 ? 'PENDING' : 'READY',
+      priority: task.priority ?? Math.max(1, (tasks.length - index) * 10),
+      retryCount: task.retryCount ?? 0,
+      maxRetries: task.maxRetries ?? 2,
+      artifacts: task.artifacts ?? [],
+      resultSummary: task.resultSummary ?? null,
+      lastError: task.lastError ?? null,
+      backgroundProcessId: task.backgroundProcessId ?? null,
+      sessionKey: task.sessionKey ?? null,
+      agent: task.agent ?? null,
+    };
+  });
+
+  const taskIds = new Set<string>();
+  for (const task of normalized) {
+    if (taskIds.has(task.taskId)) {
+      throw new Error(`Custom tasks contain duplicate taskId: ${task.taskId}`);
+    }
+    taskIds.add(task.taskId);
+  }
+
+  for (const task of normalized) {
+    for (const dependencyId of task.dependsOn ?? []) {
+      if (!taskIds.has(dependencyId)) {
+        throw new Error(`Custom task ${task.taskId} depends on missing taskId: ${dependencyId}`);
+      }
+      if (dependencyId === task.taskId) {
+        throw new Error(`Custom task ${task.taskId} cannot depend on itself`);
+      }
+    }
+  }
+
+  assertAcyclicTaskGraph(normalized);
+
+  return normalized;
+}
+
+function buildParallelTasks(count: number, mission: Mission): Task[] {
+  const workstream = inferWorkstreamType(mission.goal);
+  const taskPrefix = slugify(mission.title || mission.goal || mission.missionId);
+  return Array.from({ length: count }, (_, index) => {
+    const lane = index + 1;
+    return createTask(
+      `${taskPrefix}-lane-${lane}`,
+      `${workstream.executionTitle} (Lane ${lane}/${count})`,
+      workstream.primaryType,
+      `${workstream.executionDescription} 并行分支 ${lane}，与其他分支独立执行。`,
+      100 - index,
+      [] // no dependsOn — all READY from the start
+    );
+  });
+}
+
+function inferWorkstreamType(goal: string): { primaryType: TaskType; executionTitle: string; executionDescription: string } {
   const normalized = goal.toLowerCase();
 
   if (/code|fix|bug|implement|script|cli|api|功能|实现|修复/.test(normalized)) {
@@ -111,32 +385,17 @@ function inferWorkstream(goal: string): { primaryType: TaskType; executionTitle:
   };
 }
 
-function buildPlannedOutput(mission: Mission): PlannedOutput {
-  const workstream = inferWorkstream(mission.goal);
+function buildPlannedOutput(
+  mission: Mission,
+  customTasks: Task[] | null = null,
+  customCriteria: CompletionCriterion[] | null = null,
+  parallelCount: number | null = null
+): PlannedOutput {
+  const workstream = inferWorkstreamType(mission.goal);
   const taskPrefix = slugify(mission.title || mission.goal || mission.missionId);
+  const criteria = customCriteria ?? defaultCompletionCriteria();
 
-  const criteria: CompletionCriterion[] = [
-    {
-      id: 'criterion-plan-exists',
-      description: 'mission 已生成 plan.md，包含任务拆解、完成标准和下一步。',
-      required: true,
-      verified: false,
-    },
-    {
-      id: 'criterion-primary-output',
-      description: '至少一个主任务产出与 mission 目标直接相关的交付物。',
-      required: true,
-      verified: false,
-    },
-    {
-      id: 'criterion-verification-ready',
-      description: '存在可执行的验证任务或验收标准，能阻止“伪完成”。',
-      required: true,
-      verified: false,
-    },
-  ];
-
-  const tasks: Task[] = [
+  const tasks: Task[] = customTasks ?? (parallelCount !== null ? buildParallelTasks(parallelCount, mission) : [
     createTask(
       `${taskPrefix}-context`,
       '收集上下文与输入边界',
@@ -160,7 +419,7 @@ function buildPlannedOutput(mission: Mission): PlannedOutput {
       60,
       [`${taskPrefix}-execute`]
     ),
-  ];
+  ]);
 
   const planMarkdown = [
     `# Plan for ${mission.missionId}`,
@@ -192,9 +451,9 @@ function buildPlannedOutput(mission: Mission): PlannedOutput {
   };
 }
 
-function main(): number {
+export function main(argv: string[] = process.argv.slice(2)): number {
   try {
-    const args = parseArgs(process.argv.slice(2));
+    const args = parseArgs(argv);
     assertRequired(args);
 
     const mission = readMission(args.missionsDir, args.missionId);
@@ -202,7 +461,10 @@ function main(): number {
       throw new Error(`Mission not found: ${args.missionId}`);
     }
 
-    const output = buildPlannedOutput(mission);
+    const customTaskInput = parseCustomTasks(args);
+    const customTasks = customTaskInput ? normalizeCustomTasks(customTaskInput) : null;
+    const customCriteria = parseCustomCriteria(args);
+    const output = buildPlannedOutput(mission, customTasks, customCriteria, args.parallel);
     const nowIso = new Date().toISOString();
     const nextWakeAt = mission.nextWakeAt ?? nowIso;
     const updatedMission: Mission = {
@@ -258,4 +520,9 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+const isEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  process.exitCode = main();
+}

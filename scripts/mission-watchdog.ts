@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from 'url';
 import { appendEvent, listMissionIds, readMission, writeMission } from './lib/fs-utils.ts';
 import {
   ACTIVE_STATUSES,
@@ -116,7 +117,7 @@ function buildResult(
   };
 }
 
-function evaluateMission(mission: Mission, config: WatchdogConfig, nowMs: number): WatchdogCheckResult {
+export function evaluateMission(mission: Mission, config: WatchdogConfig, nowMs: number): WatchdogCheckResult {
   const tasks = mission.tasks ?? [];
   const backgroundProcesses = mission.backgroundProcesses ?? [];
   const nextWakeAtMs = safeDateMs(mission.nextWakeAt);
@@ -405,4 +406,9 @@ function main(): number {
   return 0;
 }
 
-process.exitCode = main();
+const isEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  process.exitCode = main();
+}

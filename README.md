@@ -1,46 +1,69 @@
-# Mission Runner 交付说明
+# Mission Runner
 
-这是面向研发团队的交付目录，用于实现一个基于 OpenClaw 现有能力的插件级自治任务编排层。
+最小可用 CLI 闭环：create/plan/dispatch/orchestrate/verify/retry/escalate。
 
-## 目标
-Mission Runner 的目标是让 OpenClaw 从“会执行的聊天体”演进为“可持续完成任务的自治体”：
-- 给定任务后自动规划
-- 自动派发与执行
-- 长任务后台化
-- 自动恢复与重试
-- 自动验证是否达成完成条件
-- 未完成则继续迭代
-- 完成后主动通知用户
-- 仅在高风险边界升级给人
+## 常用命令
 
-## 当前交付物
-- `mission-runner-plugin-implementation-draft.md`：实施草案主文档
-- `handoff.md`：给研发团队的开发范围、建议优先级与里程碑
+```bash
+npm run typecheck
+npm test
 
-## 建议研发阅读顺序
-1. 先读 `mission-runner-plugin-implementation-draft.md`
-2. 再读 `handoff.md`
-3. 按 MVP 范围做第一阶段实现
+# 创建并启动一条 mission
+npm run mission-start -- --missions-dir ./missions --title "Demo" --goal "Ship a validated loop"
 
-## 推荐实现范围（MVP）
-- 显式触发创建 mission
-- mission.json 工件落盘
-- planner 生成子任务与完成标准
-- dispatch 启动执行与后台任务
-- watchdog 负责恢复/重试/验证触发
-- verifier 判断 PASS / GAP / ESCALATE
-- notify 在完成或阻塞时主动通知
+# 有限步推进 mission（默认 3 步，可改）
+npm run mission-orchestrate -- --missions-dir ./missions --mission-id <mission-id> --max-steps 5
 
-## 非目标（第一版不做）
-- 原生 DAG 工作流引擎
-- 图形化 UI
-- 全任务类型通用化
-- 复杂权限代理与任务级授权内核化
-- 跨所有工具的统一 continuation bus
+# 单独执行 watchdog 决策动作
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action CHECK_BACKGROUND
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action TRIGGER_VERIFY
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action RESUME_TASK
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action RETRY_TASK
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action ESCALATE_STUCK
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action NOTIFY_COMPLETE
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action NOTIFY_ESCALATION
+```
 
-## 交付定位
-这不是 OpenClaw 内核改造方案，而是：
+## 当前闭环能力
 
-**基于 OpenClaw 现有 primitives 搭建的插件级自治任务编排层。**
+- `mission-orchestrate` 支持有限步 runner，能在一次调用里连续推进多个动作。
+- 已覆盖自动推进：`CHECK_BACKGROUND -> TRIGGER_VERIFY`、`RESUME_TASK -> DISPATCH`。
+- `mission-run-action` 提供最小可执行失败/升级/通知分支：`RETRY_TASK`、`ESCALATE_STUCK`、`NOTIFY_COMPLETE`、`NOTIFY_ESCALATION`。
+- 所有状态推进都落 `mission.json` + `events.jsonl`，便于验收与回放。
 
-先验证闭环与价值，再决定哪些能力值得内核化。
+## 已知边界
+
+- 通知目前只落状态与事件，不直接发外部消息。
+- 重试策略目前是 MVP：把可重试失败任务重置为 `READY`，由后续 dispatch 继续推进。
+- 编排器是有限步循环，不是长期常驻调度器。
+
+## 通知适配器（MVP）
+
+当前 `mission-run-action` 的 `NOTIFY_COMPLETE` / `NOTIFY_ESCALATION` 已接入最小通知 sender/adapter 结构：
+
+- `console`：默认，打印通知内容到控制台
+- `fake`：测试用，不做真实输出
+- `discord`：最小 Discord adapter，先固化 Discord/OpenClaw 外发载荷与 delivery metadata 回写
+
+### 使用方式
+
+```bash
+# 默认 console adapter
+npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action NOTIFY_COMPLETE
+
+# fake adapter
+MISSION_NOTIFICATION_ADAPTER=fake \
+  npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action NOTIFY_ESCALATION
+
+# discord adapter（MVP）
+MISSION_NOTIFICATION_ADAPTER=discord \
+MISSION_NOTIFICATION_DISCORD_CHANNEL=<discord-channel-id-or-name> \
+  npm run mission-run-action -- --missions-dir ./missions --mission-id <mission-id> --action NOTIFY_COMPLETE
+```
+
+### 当前 Discord adapter 边界
+
+- 这一步优先保持“最小可用”：先把 adapter/sender 结构、Discord 专属 payload、delivery metadata 回写打通。
+- `mission.json` 会在 `metadata.notificationDelivery.complete|escalation` 下记录最近一次投递元数据。
+- `events.jsonl` 的 `mission_notified_complete` / `mission_notified_escalation` 事件也会附带 `delivery` 字段。
+- 目前未直接调用外部 Discord API；后续可以把 `discord` adapter 内部实现替换为 OpenClaw `message` 能力，而不影响现有 console/fake adapter 或上层调用方式。

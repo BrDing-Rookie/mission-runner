@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from 'url';
 import { appendEvent, writeMission } from './lib/fs-utils.ts';
-import { nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
+import { deriveMissionStatus, nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
 import type { Mission, Task, TaskStatus } from './lib/types.ts';
 
 const DEPENDENCY_DONE_STATUSES: TaskStatus[] = ['COMPLETED', 'SKIPPED'];
-const TERMINAL_TASK_STATUSES: TaskStatus[] = ['COMPLETED', 'FAILED', 'SKIPPED'];
-const ACTIVE_DISPATCHABLE_STATUSES: TaskStatus[] = ['READY', 'RUNNING', 'WAITING_BACKGROUND'];
-const RESUMABLE_MISSION_STATUSES = new Set<Mission['status']>(['ITERATING', 'WAITING_EXTERNAL']);
+const RESUMABLE_MISSION_STATUSES = new Set<Mission['status']>(['ITERATING', 'WAITING_EXTERNAL', 'WAITING_BACKGROUND']);
 
 function dependenciesSatisfied(task: Task, taskMap: Map<string, Task>): boolean {
   const dependsOn = task.dependsOn ?? [];
@@ -17,21 +16,9 @@ function dependenciesSatisfied(task: Task, taskMap: Map<string, Task>): boolean 
   });
 }
 
-function deriveMissionStatus(originalStatus: Mission['status'], tasks: Task[]): Mission['status'] {
-  if (tasks.some((task) => ACTIVE_DISPATCHABLE_STATUSES.includes(task.status))) {
-    return 'RUNNING';
-  }
-
-  if (tasks.length > 0 && tasks.every((task) => TERMINAL_TASK_STATUSES.includes(task.status))) {
-    return 'VERIFYING';
-  }
-
-  return originalStatus;
-}
-
-function main(): number {
+export function main(argv: string[] = process.argv.slice(2)): number {
   try {
-    const args = parseMissionCliArgs(process.argv.slice(2));
+    const args = parseMissionCliArgs(argv);
     const mission = requireMission(args);
     const timestamp = nowIso();
     const shouldResumeTasks = RESUMABLE_MISSION_STATUSES.has(mission.status);
@@ -64,6 +51,7 @@ function main(): number {
         const updatedTask: Task = {
           ...task,
           status: 'READY',
+          lastError: null,
         };
         taskMap.set(task.taskId, updatedTask);
         return updatedTask;
@@ -72,7 +60,10 @@ function main(): number {
       return task;
     });
 
-    const nextStatus = deriveMissionStatus(mission.status, updatedTasks);
+    let nextStatus = deriveMissionStatus(mission.status, updatedTasks);
+    if (unlockedTaskIds.length > 0 && nextStatus === 'ITERATING') {
+      nextStatus = 'RUNNING';
+    }
     const updatedMission: Mission = {
       ...mission,
       status: nextStatus,
@@ -108,4 +99,9 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+const isEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  process.exitCode = main();
+}

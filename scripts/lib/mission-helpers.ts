@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { appendEvent, readMission, safeWriteFile, writeMission } from './fs-utils.ts';
-import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskType, VerificationStatus } from './types.ts';
+import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskStatus, TaskType, VerificationStatus } from './types.ts';
 
 export interface MissionCliArgs { missionsDir: string; missionId: string; dryRun: boolean; }
 export function parseMissionCliArgs(argv: string[]): MissionCliArgs {
@@ -64,9 +64,24 @@ export function loadTextIfExists(filePath: string): string | null { return exist
 export function upsertArtifact(artifacts: MissionArtifact[] | undefined, artifact: MissionArtifact): MissionArtifact[] {
   const next = [...(artifacts ?? [])]; const index = next.findIndex((item) => item.path === artifact.path); if (index >= 0) next[index] = artifact; else next.push(artifact); return next;
 }
+export function upsertTaskArtifact(artifacts: TaskArtifact[] | undefined, artifact: TaskArtifact): TaskArtifact[] {
+  const next = [...(artifacts ?? [])]; const index = next.findIndex((item) => item.path === artifact.path); if (index >= 0) next[index] = artifact; else next.push(artifact); return next;
+}
+/**
+ * Unified mission status derivation from task states.
+ * WAITING_BACKGROUND takes priority, then RUNNING/READY, then all-terminal → VERIFYING.
+ */
+export function deriveMissionStatus(originalStatus: MissionStatus, tasks: Task[]): MissionStatus {
+  if (tasks.length === 0) return originalStatus;
+  const TERMINAL: TaskStatus[] = ['COMPLETED', 'FAILED', 'SKIPPED'];
+  if (tasks.some((t) => t.status === 'WAITING_BACKGROUND')) return 'WAITING_BACKGROUND';
+  if (tasks.some((t) => t.status === 'RUNNING' || t.status === 'READY')) return 'RUNNING';
+  if (tasks.every((t) => TERMINAL.includes(t.status))) return 'VERIFYING';
+  return originalStatus;
+}
 export function setMissionStatus(mission: Mission, status: MissionStatus): Mission {
   const timestamp = nowIso(); return { ...mission, status, updatedAt: timestamp, lastProgressAt: timestamp };
 }
-export function setVerification(mission: Mission, verification: { status: VerificationStatus; summary: string; gaps: string[] }): Mission {
-  const timestamp = nowIso(); return { ...mission, updatedAt: timestamp, verification: { status: verification.status, lastCheckedAt: timestamp, summary: verification.summary, gaps: verification.gaps } };
+export function setVerification(mission: Mission, verification: { status: VerificationStatus; summary: string; gaps: string[]; criteriaResults?: Array<{ criterionId: string; passed: boolean; reason: string }> }): Mission {
+  const timestamp = nowIso(); return { ...mission, updatedAt: timestamp, verification: { status: verification.status, lastCheckedAt: timestamp, summary: verification.summary, gaps: verification.gaps, criteriaResults: verification.criteriaResults } };
 }
