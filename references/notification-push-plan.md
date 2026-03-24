@@ -212,6 +212,66 @@ Mission Runner 脚本是短命进程（非长驻），每次状态变更时同�
 
 ---
 
+## Agent 间通信（混合模式）
+
+### 双通道设计
+
+通知推送分为两个通道，由 `emitNotifications()` 统一调度：
+
+```
+commitMissionUpdate()
+    │
+    ├── 通道 A：用户通知（所有状态变更）
+    │   └── openclaw message send → 用户所在渠道（Discord/Slack/...）
+    │
+    └── 通道 B：Agent 间触发（关键节点）
+        └── openclaw message send → 下游 Agent 的 sessionKey
+```
+
+### 通道 B 触发规则
+
+不是所有状态变更都需要通知下游 Agent，只在以下关键节点触发：
+
+| 触发条件 | 通知目标 | 消息内容 |
+|---------|---------|---------|
+| 任务完成（task → COMPLETED） | Orchestrator Agent | `任务 {taskId} 已完成，可触发下一步` |
+| 任务失败（task → FAILED） | Recovery Agent（如有） | `任务 {taskId} 失败：{lastError}` |
+| 全部任务完成（→ VERIFYING） | Verifier Agent（如有） | `Mission {missionId} 所有任务完成，请验证` |
+| 验证发现 gap（→ ITERATING） | Planner Agent | `验证发现 {n} 个缺口，需补充任务` |
+| 升级（→ ESCALATED） | Owner Agent | `Mission 需要人工介入：{reason}` |
+
+### Agent 路由
+
+每个 task 已有 `agent` 和 `sessionKey` 字段（定义在 `types.ts` Task 接口中）。Agent 间通信通过这些字段路由：
+
+```typescript
+// 在 detectTransitions() 中，识别需要触发下游 Agent 的场景
+interface AgentNotification {
+  targetSessionKey: string;    // 下游 Agent 的 sessionKey
+  content: string;             // human-readable 消息
+  missionId: string;
+  taskId?: string;
+}
+```
+
+发送方式同样使用 `openclaw message send`，但 `--to` 参数指向 Agent 的 sessionKey 而非用户的 chatId：
+
+```bash
+# 通知用户
+openclaw message send --channel discord --to <user-chatId> --message "..."
+
+# 触发下游 Agent
+openclaw message send --channel internal --to <agent-sessionKey> --message "..."
+```
+
+### 降级保障
+
+Agent 间通信失败时，不影响 mission 推进——watchdog 的定期扫描机制作为兜底：
+- 即使 Agent 间消息丢失，watchdog 下一轮扫描仍会检测到状态变更并推进
+- Agent 间消息是"加速器"，共享工件 + watchdog 扫描是"保底线"
+
+---
+
 ## 幂等性
 
 - `commitMissionUpdate()` 在发通知前检查 `mission.flags.notifiedTransitions["PLANNED->RUNNING"]`
