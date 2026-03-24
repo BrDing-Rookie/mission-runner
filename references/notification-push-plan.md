@@ -6,15 +6,26 @@
 
 核心挑战：状态变更分散在 10+ 个脚本中，需要一个合理的集中拦截机制。
 
-**OpenClaw message 能力调研结果**：
-- OpenClaw 提供 CLI 命令 `openclaw message send --channel <channel> --to <target> --message "..."`
-- 底层通过 Channel Plugin 体系的 `ChannelOutboundAdapter`（`sendText/sendPayload`）投递到 Discord/Slack 等 20+ 渠道
-- 路由解析通过 `src/routing/resolve-route.ts` 的 bindings 配置，按 peer/guild/account/channel 维度匹配
-- 每个会话有唯一 `sessionKey`（agentId + channel + accountId + peer），Mission Runner 的 `mission.owner.sessionKey` 即对应 OpenClaw session
+### 交互模型
+
+所有交互发生在**群聊**（Discord/Slack 等）中：
+
+1. 用户在群聊中和 Agent 对话，Agent 接收消息后决定创建 mission
+2. 创建 mission 后，发现群聊内的其他 Agent，创建计划，通过群聊 **@mention** 通知指定 Agent
+3. Agent 接收消息后发生状态变更，在群聊内发送变更详情
+
+**群聊本身就是 Agent 间的通信总线**，不需要额外的 internal channel 或 session-to-session 通信。
+
+### OpenClaw message 能力
+
+- CLI 命令：`openclaw message send --channel <channel> --to <chatId> --message "..."`
+- 底层通过 Channel Plugin 体系的 `ChannelOutboundAdapter` 投递到 Discord/Slack 等 20+ 渠道
+- `mission.owner.chatId` 对应**群聊 ID**，所有通知统一发到群聊
+- OpenClaw inbound routing 会自动将群聊中 @某 Agent 的消息路由到该 Agent 的 session
 
 ---
 
-## 架构设计：集中式提交层 + 变更检测
+## 架构设计：集中式提交层 + 变更检测 + 群聊 @mention
 
 ### 核心思路
 
@@ -23,12 +34,137 @@
 ```
 各脚本 → commitMissionUpdate(oldMission, newMission)
               │
-              ├── writeMission()         // 原有落盘
-              ├── detectTransitions()    // 比对 old/new，识别变更类型
-              └── emitNotifications()    // 构建消息 → 适配器发送
+              ├── writeMission()              // 原有落盘
+              ├── detectTransitions()         // 比对 old/new，识别变更类型
+              ├── resolveMentions()           // 根据变更类型确定 @mention 目标
+              └── emitNotifications()         // 构建消息（含 @mention）→ 发到群聊
 ```
 
+单通道设计：所有消息都发到群聊，用 @mention 区分目标（用户或 Agent），用户和 Agent 都能看到所有状态变更。
+
 通知失败不阻塞 mission 推进（fire-and-forget + 日志记录）。
+
+---
+
+## Agent 发现
+
+### 群聊内 Agent 发现机制
+
+Mission Runner 作为 OpenClaw 插件，通过 OpenClaw 配置发现群聊内可用的 Agent：
+
+```typescript
+// scripts/lib/mission-agent-discovery.ts（新增）
+
+import type { Task } from './types.ts';
+
+/** 群聊内可用的 Agent 信息 */
+export interface AvailableAgent {
+  agentId: string;            // OpenClaw agent ID
+  name: string;               // 显示名称
+  mentionTag: string;         // 渠道内 @mention 标记（如 Discord 的 <@botUserId>）
+  skills: string[];           // Agent 具备的 skill 列表
+  taskTypes: string[];        // Agent 擅长的任务类型
+}
+
+/** 从 OpenClaw 配置获取群聊内可用 Agent */
+export function discoverAgents(options: {
+  channel: string;
+  chatId: string;
+}): AvailableAgent[] {
+  // 通过 OpenClaw 的 listAgentEntries(cfg) 获取配置的 agent 列表
+  // 通过 routing/bindings 过滤出绑定到当前群聊（channel + chatId）的 agent
+  // 返回可用 Agent 列表（含 mentionTag）
+}
+
+/** 根据 task type 匹配最佳 Agent */
+export function matchAgentForTask(
+  task: Task,
+  agents: AvailableAgent[]
+): AvailableAgent | null {
+  // 优先匹配 taskTypes 包含 task.type 的 Agent
+  // 其次匹配 skills 相关的 Agent
+  // 无匹配则返回 null（由 orchestrator 自己执行）
+}
+```
+
+### Plan 阶段消费 Agent 信息
+
+`mission-plan.ts` 改造：
+
+```typescript
+// plan 阶段
+const agents = discoverAgents({
+  channel: mission.owner?.channel ?? '',
+  chatId: mission.owner?.chatId ?? '',
+});
+
+const tasks = buildTasks(mission);
+
+// 为每个 task 分配 agent
+for (const task of tasks) {
+  const matched = matchAgentForTask(task, agents);
+  if (matched) {
+    task.agent = matched.agentId;
+    // 新增字段：存储 mention 标记，供消息模板使用
+    task.config = { ...task.config, agentMentionTag: matched.mentionTag, agentName: matched.name };
+  }
+}
+```
+
+---
+
+## @mention 机制
+
+### 渠道格式
+
+不同渠道的 @mention 格式不同：
+
+| 渠道 | @mention 格式 | 示例 |
+|------|--------------|------|
+| Discord | `<@botUserId>` | `<@1234567890>` |
+| Slack | `<@memberId>` | `<@U01ABC123>` |
+| CLI | `@agentName` | `@Researcher` |
+
+### mention 解析
+
+```typescript
+// scripts/lib/mission-notification-mentions.ts（新增）
+
+/** 根据状态变更确定 @mention 目标 */
+export function resolveMentions(
+  transition: TransitionInfo,
+  mission: Mission
+): string[] {
+  const mentions: string[] = [];
+
+  switch (transition.kind) {
+    case 'task_dispatched':
+      // @被分配的 Agent
+      const task = mission.tasks?.find(t => t.taskId === transition.taskId);
+      const tag = task?.config?.agentMentionTag as string | undefined;
+      if (tag) mentions.push(tag);
+      break;
+
+    case 'task_completed':
+    case 'task_failed':
+      // @Orchestrator（通知编排者继续推进）
+      // orchestrator 的 mentionTag 从 mission.metadata 中获取
+      const orchTag = mission.metadata?.orchestratorMentionTag as string | undefined;
+      if (orchTag) mentions.push(orchTag);
+      break;
+
+    case 'mission_completed':
+    case 'mission_escalated':
+      // @用户（通知 mission 发起者）
+      // 用户的 mention 信息从 mission.owner 获取
+      const userMention = mission.owner?.requestMessageId; // 或专门的 mention 字段
+      if (userMention) mentions.push(userMention);
+      break;
+  }
+
+  return mentions;
+}
+```
 
 ---
 
@@ -52,7 +188,8 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
   if (!options.dryRun && !options.skipNotification) {
     const transitions = detectTransitions(options.oldMission, options.newMission);
     for (const t of transitions) {
-      emitNotification(t, options);  // fire-and-forget
+      const mentions = resolveMentions(t, options.newMission);
+      emitNotification(t, mentions, options);  // fire-and-forget
     }
   }
   return true;
@@ -62,55 +199,109 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
 **`detectTransitions(old, new)`** 返回需要推送的通知列表：
 - 比对 `old.status !== new.status` → mission 级状态变更通知
 - 比对 tasks: READY → RUNNING/WAITING_BACKGROUND → task 分发通知
+- 比对 tasks: RUNNING → COMPLETED/FAILED → task 完成/失败通知
 
-### 2. `scripts/lib/mission-notification-templates.ts` — 消息模板
+### 2. `scripts/lib/mission-notification-templates.ts` — 消息模板（含 @mention）
 
-为每种状态变更生成 human-readable 消息：
+为每种状态变更生成 human-readable 消息，消息末尾附加 @mention：
 
 | 状态变更 | 消息示例 |
 |---------|---------|
 | `→ CREATED` | `📋 新任务已创建「{title}」目标：{goal}` |
-| `→ PLANNED` | `📝 任务「{title}」计划已生成，共 {n} 个子任务待执行` |
-| `→ RUNNING` | `🚀 任务「{title}」开始执行` |
+| `→ PLANNED` | `📝 任务「{title}」计划已生成，共 {n} 个子任务：\n- T1: {title} → @Researcher\n- T2: {title} → @Analyst\n@Researcher 请开始执行 T1` |
+| `→ RUNNING` | `🚀 任务「{title}」开始执行 @{agentName}` |
 | `→ WAITING_BACKGROUND` | `⏳ 任务「{title}」等待后台进程完成` |
 | `→ WAITING_EXTERNAL` | `⏳ 任务「{title}」等待外部条件` |
 | `→ VERIFYING` | `🔍 任务「{title}」已进入验证阶段，{m}/{n} 子任务完成` |
 | `→ ITERATING` | `🔄 任务「{title}」验证发现 {n} 个缺口，进入第 {i} 轮迭代` |
-| `→ COMPLETED` | `✅ 任务「{title}」已完成` |
-| `→ FAILED` | `❌ 任务「{title}」已失败：{reason}` |
-| `→ ESCALATED` | `⚠️ 任务「{title}」需要人工介入：{reason}` |
-| task 分发 | `📤 子任务 [{taskId}]「{taskTitle}」已分配，类型：{type}` |
+| `→ COMPLETED` | `✅ 任务「{title}」已完成 @{user}` |
+| `→ FAILED` | `❌ 任务「{title}」已失败：{reason} @{orchestrator}` |
+| `→ ESCALATED` | `⚠️ 任务「{title}」需要人工介入：{reason} @{user}` |
+| task 分发 | `📤 子任务 [{taskId}]「{taskTitle}」已分配 @{agentName}，类型：{type}` |
+| task 完成 | `✅ 子任务 [{taskId}]「{taskTitle}」已完成，产物：{artifacts} @{orchestrator}` |
+| task 失败 | `❌ 子任务 [{taskId}]「{taskTitle}」失败：{lastError} @{orchestrator}` |
 
-每条消息包含：
-- **状态流转**：`PLANNED → RUNNING`
-- **Mission 标识**：`{title} ({missionId})`
-- **上下文信息**：根据场景附带任务数量、失败原因、迭代轮次等
+### 3. `scripts/lib/mission-agent-discovery.ts` — Agent 发现
+
+见上方"Agent 发现"章节。
+
+### 4. `scripts/lib/mission-notification-mentions.ts` — @mention 解析
+
+见上方"@mention 机制"章节。
 
 ---
 
 ## 修改现有文件
 
+### `scripts/lib/types.ts`
+
+1. `MissionOwner.chatId` 语义明确为**群聊 ID**：
+
+   ```typescript
+   export interface MissionOwner {
+     sessionKey: string;
+     channel?: 'discord' | 'slack' | 'cli' | 'web' | 'api';
+     chatId?: string;               // 群聊 ID（Discord guild/channel, Slack channel 等）
+     requestMessageId?: string;
+     userMentionTag?: string;        // 新增：用户在渠道内的 @mention 标记
+   }
+   ```
+
+2. `MissionFlags` 增加幂等标记：
+
+   ```typescript
+   export interface MissionFlags {
+     notifiedStart?: boolean;
+     notifiedComplete?: boolean;
+     notifiedEscalation?: boolean;
+     userUpdated?: boolean;
+     notifiedTransitions?: Record<string, boolean>;  // 新增：幂等去重
+   }
+   ```
+
+3. `Mission.metadata` 约定存储 orchestrator 信息：
+
+   ```typescript
+   // metadata 中约定字段
+   metadata?: {
+     orchestratorAgentId?: string;
+     orchestratorMentionTag?: string;
+     [key: string]: unknown;
+   };
+   ```
+
 ### `scripts/lib/mission-notification.ts`
 
 1. **扩展 `MissionNotificationKind`**：
+
    ```typescript
    export type MissionNotificationKind =
-     | 'complete' | 'escalation'   // 保留向后兼容
-     | 'status_transition'         // 通用状态变更
-     | 'task_dispatched';          // 任务分发
+     | 'complete' | 'escalation'       // 保留向后兼容
+     | 'status_transition'             // mission 级状态变更
+     | 'task_dispatched'               // 任务分发
+     | 'task_completed'                // 任务完成
+     | 'task_failed';                  // 任务失败
    ```
 
 2. **扩展 `MissionNotificationPayload`**：
+
    ```typescript
-   // 新增可选字段
-   transitionFrom?: MissionStatus;
-   transitionTo?: MissionStatus;
-   dispatchedTasks?: Array<{ taskId: string; title: string; type: string; agent?: string }>;
-   source?: string;
+   export interface MissionNotificationPayload {
+     kind: MissionNotificationKind;
+     missionId: string;
+     title: string;
+     status: Mission['status'];
+     content: string;
+     mentions?: string[];              // 新增：@mention 标记列表
+     transitionFrom?: MissionStatus;   // 新增
+     transitionTo?: MissionStatus;     // 新增
+     taskId?: string;                  // 新增：关联的 task
+     source?: string;                  // 新增：触发来源
+     metadata?: Record<string, unknown>;
+   }
    ```
 
-3. **新增 `OpenClawMissionNotificationAdapter`**：
-   通过 `child_process.execSync` 调用 `openclaw message send` CLI 命令发送消息。
+3. **`OpenClawMissionNotificationAdapter` 发送到群聊**：
 
    ```typescript
    export class OpenClawMissionNotificationAdapter implements MissionNotificationAdapter {
@@ -119,7 +310,6 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
      send(payload: MissionNotificationPayload, context: { mission: Mission; dryRun: boolean }): MissionNotificationResult {
        const owner = context.mission.owner;
        if (!owner?.channel || !owner?.chatId) {
-         // 无渠道信息，降级到 console
          return new ConsoleMissionNotificationAdapter().send(payload, context);
        }
 
@@ -127,17 +317,23 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
          return { delivered: false, metadata: { adapter: this.name, deliveredAt: nowIso(), dryRun: true } };
        }
 
+       // 消息内容 + @mention 拼接
+       const mentionSuffix = (payload.mentions ?? []).length > 0
+         ? '\n' + payload.mentions!.join(' ')
+         : '';
+       const fullContent = payload.content + mentionSuffix;
+
        try {
-         // 调用 OpenClaw CLI 发送消息
-         execSync(`openclaw message send --channel ${owner.channel} --to ${owner.chatId} --message ${escapeShellArg(payload.content)}`, {
-           timeout: 10_000,
-           stdio: 'pipe',
-         });
+         execSync(
+           `openclaw message send --channel ${owner.channel} --to ${owner.chatId} --message ${escapeShellArg(fullContent)}`,
+           { timeout: 10_000, stdio: 'pipe' }
+         );
          return {
            delivered: true,
            metadata: {
              adapter: this.name,
              target: `${owner.channel}:${owner.chatId}`,
+             mentions: payload.mentions,
              deliveredAt: nowIso(),
            },
          };
@@ -163,23 +359,37 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
 
 - `persistMissionUpdate()` 增加 `oldMission` 参数，内部改用 `commitMissionUpdate()`
 
-### `scripts/lib/types.ts`
+### `scripts/mission-plan.ts`
 
-- `MissionFlags` 增加 `notifiedTransitions?: Record<string, boolean>` 用于幂等去重
-  - key 格式：`"PLANNED->RUNNING"`, `"task:T1:READY->RUNNING"`
+核心改造：plan 阶段引入 Agent 发现和分配：
+
+1. 调用 `discoverAgents()` 获取群聊内可用 Agent
+2. 为每个 task 调用 `matchAgentForTask()` 分配 agent
+3. 写入 `task.agent`（agentId）和 `task.config.agentMentionTag`（@mention 标记）
+4. 在 mission.metadata 中记录 orchestrator 的 agentId 和 mentionTag
+
+### `scripts/mission-create.ts`
+
+确保从 OpenClaw 上下文获取群聊信息写入 `owner`：
+
+- `owner.channel` — 渠道类型
+- `owner.chatId` — 群聊 ID
+- `owner.userMentionTag` — 用户的 @mention 标记
+- `metadata.orchestratorAgentId` — 创建者 Agent 的 ID
+- `metadata.orchestratorMentionTag` — 创建者 Agent 的 @mention 标记
 
 ### 需要迁移的脚本（将 `writeMission()` 替换为 `commitMissionUpdate()`）
 
 | 脚本 | 状态变更 | 优先级 |
 |------|---------|--------|
 | `mission-dispatch.ts` | PLANNED → RUNNING/WAITING_BACKGROUND + task 分发 | P0 |
-| `mission-plan.ts` | CREATED → PLANNED | P0 |
+| `mission-plan.ts` | CREATED → PLANNED + Agent 分配 | P0 |
 | `mission-verify.ts`（via persistMissionUpdate） | VERIFYING → COMPLETED/ITERATING/FAILED | P0 |
 | `mission-resume.ts` | ITERATING → RUNNING | P1 |
 | `mission-reconcile-background.ts` | WAITING_BACKGROUND → RUNNING/VERIFYING | P1 |
 | `mission-run-action.ts` (retryFailedTasks/setEscalationState) | → RUNNING/ESCALATED | P1 |
-| `mission-create.ts` | → CREATED（特殊：无 oldMission，用空壳比对） | P1 |
-| `task-update.ts` | task 状态变更触发 mission 状态推导 | P2 |
+| `mission-create.ts` | → CREATED（写入群聊信息和 orchestrator 信息） | P1 |
+| `task-update.ts` | task 状态变更 → 群聊通知 + @orchestrator | P2 |
 
 ---
 
@@ -194,14 +404,7 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
 | `console`（默认） | 输出到 stderr | 本地开发/调试 |
 | `fake` | 静默，不输出 | 测试 |
 | `discord` | 记录 Discord 元数据 | 保留兼容 |
-| `openclaw` | 调用 `openclaw message send` CLI | **生产环境** |
-
-### 渠道路由
-
-从 `mission.owner` 自动路由：
-- `owner.channel === 'discord'` + `owner.chatId` → `openclaw message send --channel discord --to <chatId>`
-- `owner.channel === 'slack'` + `owner.chatId` → `openclaw message send --channel slack --to <chatId>`
-- `owner.channel === 'cli'` 或未设置 → 降级到 console 输出
+| `openclaw` | 调用 `openclaw message send` CLI → 群聊 | **生产环境** |
 
 ### 消息发送时机
 
@@ -212,63 +415,51 @@ Mission Runner 脚本是短命进程（非长驻），每次状态变更时同�
 
 ---
 
-## Agent 间通信（混合模式）
-
-### 双通道设计
-
-通知推送分为两个通道，由 `emitNotifications()` 统一调度：
+## 完整交互流程示例
 
 ```
-commitMissionUpdate()
-    │
-    ├── 通道 A：用户通知（所有状态变更）
-    │   └── openclaw message send → 用户所在渠道（Discord/Slack/...）
-    │
-    └── 通道 B：Agent 间触发（关键节点）
-        └── openclaw message send → 下游 Agent 的 sessionKey
+群聊（Discord #project-channel）
+ │
+ │  用户: "帮我调研 Claude API 最新功能并输出报告"
+ │
+ ├─ 🤖 Orchestrator（mission-create + mission-plan）
+ │     群聊发送：
+ │     "📋 新任务已创建「Claude API 调研」
+ │      目标：调研 Claude API 最新功能并输出报告
+ │
+ │      📝 计划已生成，共 2 个子任务：
+ │      - T1: 搜索最新功能 → @Researcher
+ │      - T2: 整理报告 → @Analyst
+ │
+ │      📤 T1「搜索最新功能」已分配 @Researcher"
+ │
+ ├─ 🤖 Researcher（被 @ 触发，执行 T1）
+ │     群聊发送：
+ │     "🚀 T1「搜索最新功能」READY → RUNNING"
+ │     ...执行...
+ │     "✅ T1「搜索最新功能」RUNNING → COMPLETED
+ │      已收集 5 个来源，产物: artifacts/T1-sources.json
+ │      @Orchestrator"
+ │
+ ├─ 🤖 Orchestrator（收到 T1 完成，dispatch T2）
+ │     群聊发送：
+ │     "📤 T2「整理报告」已就绪 @Analyst"
+ │
+ ├─ 🤖 Analyst（被 @ 触发，执行 T2）
+ │     群聊发送：
+ │     "🚀 T2「整理报告」READY → RUNNING"
+ │     ...执行...
+ │     "✅ T2「整理报告」RUNNING → COMPLETED
+ │      产物: artifacts/final-report.md
+ │      @Orchestrator"
+ │
+ └─ 🤖 Orchestrator（verify → 完成）
+       群聊发送：
+       "🔍 任务「Claude API 调研」进入验证阶段
+       ✅ 任务「Claude API 调研」已完成
+        报告: artifacts/final-report.md
+        @用户"
 ```
-
-### 通道 B 触发规则
-
-不是所有状态变更都需要通知下游 Agent，只在以下关键节点触发：
-
-| 触发条件 | 通知目标 | 消息内容 |
-|---------|---------|---------|
-| 任务完成（task → COMPLETED） | Orchestrator Agent | `任务 {taskId} 已完成，可触发下一步` |
-| 任务失败（task → FAILED） | Recovery Agent（如有） | `任务 {taskId} 失败：{lastError}` |
-| 全部任务完成（→ VERIFYING） | Verifier Agent（如有） | `Mission {missionId} 所有任务完成，请验证` |
-| 验证发现 gap（→ ITERATING） | Planner Agent | `验证发现 {n} 个缺口，需补充任务` |
-| 升级（→ ESCALATED） | Owner Agent | `Mission 需要人工介入：{reason}` |
-
-### Agent 路由
-
-每个 task 已有 `agent` 和 `sessionKey` 字段（定义在 `types.ts` Task 接口中）。Agent 间通信通过这些字段路由：
-
-```typescript
-// 在 detectTransitions() 中，识别需要触发下游 Agent 的场景
-interface AgentNotification {
-  targetSessionKey: string;    // 下游 Agent 的 sessionKey
-  content: string;             // human-readable 消息
-  missionId: string;
-  taskId?: string;
-}
-```
-
-发送方式同样使用 `openclaw message send`，但 `--to` 参数指向 Agent 的 sessionKey 而非用户的 chatId：
-
-```bash
-# 通知用户
-openclaw message send --channel discord --to <user-chatId> --message "..."
-
-# 触发下游 Agent
-openclaw message send --channel internal --to <agent-sessionKey> --message "..."
-```
-
-### 降级保障
-
-Agent 间通信失败时，不影响 mission 推进——watchdog 的定期扫描机制作为兜底：
-- 即使 Agent 间消息丢失，watchdog 下一轮扫描仍会检测到状态变更并推进
-- Agent 间消息是"加速器"，共享工件 + watchdog 扫描是"保底线"
 
 ---
 
@@ -276,21 +467,45 @@ Agent 间通信失败时，不影响 mission 推进——watchdog 的定期扫�
 
 - `commitMissionUpdate()` 在发通知前检查 `mission.flags.notifiedTransitions["PLANNED->RUNNING"]`
 - 同一状态转换只通知一次
+- task 分发通知通过 `"task:T1:READY->RUNNING"` key 去重
 - 通知标记随 mission.json 一起原子写入
+
+---
+
+## 降级保障
+
+- 通知发送失败不阻塞 mission 推进（fire-and-forget）
+- Agent @mention 失败不影响 watchdog 定期扫描机制——watchdog 作为兜底仍会检测状态变更并推进
+- @mention 是"加速器"，watchdog 扫描是"保底线"
 
 ---
 
 ## 实现步骤
 
-1. **Phase 1 - 基础设施**：新增 `mission-commit.ts` + `mission-notification-templates.ts`，扩展 notification 类型，新增 `OpenClawMissionNotificationAdapter`
-2. **Phase 2 - P0 脚本迁移**：dispatch / plan / verify 三个核心脚本接入 `commitMissionUpdate`
-3. **Phase 3 - P1 脚本迁移**：resume / reconcile / run-action / create
-4. **Phase 4 - P2 脚本迁移**：task-update
+1. **Phase 1 - 基础设施**：
+   - 新增 `mission-commit.ts`（集中提交层）
+   - 新增 `mission-notification-templates.ts`（含 @mention 的消息模板）
+   - 新增 `mission-agent-discovery.ts`（Agent 发现）
+   - 新增 `mission-notification-mentions.ts`（@mention 解析）
+   - 扩展 `mission-notification.ts`（新 Kind、Payload.mentions、OpenClawAdapter）
+   - 扩展 `types.ts`（MissionOwner.userMentionTag、MissionFlags.notifiedTransitions）
+
+2. **Phase 2 - P0 脚本迁移**：
+   - `mission-plan.ts` — Agent 发现 + 分配 + commitMissionUpdate
+   - `mission-dispatch.ts` — commitMissionUpdate + task 分发 @mention
+   - `mission-verify.ts` — commitMissionUpdate
+
+3. **Phase 3 - P1 脚本迁移**：
+   - `mission-create.ts` — 写入群聊信息和 orchestrator 信息
+   - `mission-resume.ts` / `mission-reconcile-background.ts` / `mission-run-action.ts`
+
+4. **Phase 4 - P2 脚本迁移**：
+   - `task-update.ts` — Agent 汇报完成/失败 + @orchestrator
 
 ## 验证方式
 
 1. `npm run typecheck` — 类型检查通过
 2. `npm test` — 现有测试不回归
-3. 手动验证：设置 `MISSION_NOTIFICATION_ADAPTER=console`，运行 `npm run mission-start` 观察 stderr 是否输出 `mission_created` 和 `mission_planned` 的 human-readable 消息
-4. 手动验证：运行 `npm run mission-dispatch` 观察 `status_transition` 和 `task_dispatched` 消息
-5. 集成验证：设置 `MISSION_NOTIFICATION_ADAPTER=openclaw`，确认 `openclaw message send` 被正确调用
+3. 手动验证（console adapter）：`MISSION_NOTIFICATION_ADAPTER=console npm run mission-start` 观察 stderr 输出是否包含状态变更消息和 @mention 标记
+4. 手动验证（console adapter）：`npm run mission-dispatch` 观察 task 分发消息是否 @指定 Agent
+5. 集成验证：`MISSION_NOTIFICATION_ADAPTER=openclaw` 确认消息发送到群聊且 @mention 格式正确
