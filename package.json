@@ -1,8 +1,13 @@
 {
-  "name": "mission-runner",
+  "name": "@openclaw/mission-runner",
   "version": "0.1.0",
   "description": "OpenClaw 插件级自治任务编排层 - MVP Phase 1",
   "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test scripts/*.test.ts",
