@@ -7,7 +7,7 @@ function resolveMissionsDir(rawArgs: Record<string, unknown>, defaultMissionsDir
 
 test('plugin-configured missionsDir is used when tool caller omits missions_dir', () => {
   const resolved = resolveMissionsDir(
-    { title: 'Config wiring test', goal: 'Ensure plugin config missionsDir is honored' },
+    { mission_id: 'mission-123', task_id: 'task-456', status: 'COMPLETED' },
     'custom-missions-root',
   );
 
@@ -16,7 +16,7 @@ test('plugin-configured missionsDir is used when tool caller omits missions_dir'
 
 test('explicit missions_dir overrides plugin-configured missionsDir', () => {
   const resolved = resolveMissionsDir(
-    { missions_dir: 'explicit-missions-root', title: 'Explicit override test', goal: 'Ensure explicit missions_dir wins' },
+    { missions_dir: 'explicit-missions-root', mission_id: 'mission-123', task_id: 'task-456', status: 'COMPLETED' },
     'custom-missions-root',
   );
 

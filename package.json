@@ -23,7 +23,8 @@
     "task-add": "tsx scripts/task-add.ts",
     "watchdog": "tsx scripts/mission-watchdog.ts",
     "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
-    "create-mission": "tsx scripts/mission-create.ts"
+    "create-mission": "tsx scripts/mission-create.ts",
+    "test:plugin-smoke": "node --import /home/ubuntu/public-deliverables/mission-runner/node_modules/tsx/dist/loader.mjs ./scripts/plugin-loader-smoke.ts"
   },
   "dependencies": {
     "zod": "^3.22.4"
