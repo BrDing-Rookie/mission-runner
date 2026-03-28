@@ -6,6 +6,7 @@ import { pathToFileURL } from 'url';
 import { readMission } from './lib/fs-utils.ts';
 import { discoverAgents, matchAgentForTask } from './lib/mission-agent-discovery.ts';
 import { commitMissionUpdate } from './lib/mission-commit.ts';
+import { derivePhaseFromTask } from './lib/mission-helpers.ts';
 import type { CompletionCriterion, Mission, Task, TaskType } from './lib/types.ts';
 
 interface PlanArgs {
@@ -318,6 +319,7 @@ function normalizeCustomTasks(tasks: TaskInput[]): Task[] {
       backgroundProcessId: task.backgroundProcessId ?? null,
       sessionKey: task.sessionKey ?? null,
       agent: task.agent ?? null,
+      ...(task.phase !== undefined ? { phase: task.phase } : {}),
     };
   });
 
@@ -397,30 +399,39 @@ function buildPlannedOutput(
   const taskPrefix = slugify(mission.title || mission.goal || mission.missionId);
   const criteria = customCriteria ?? defaultCompletionCriteria();
 
-  const tasks: Task[] = customTasks ?? (parallelCount !== null ? buildParallelTasks(parallelCount, mission) : [
-    createTask(
-      `${taskPrefix}-context`,
-      '收集上下文与输入边界',
-      'analysis',
-      '读取 mission 目标、现有文档和相关工件，确认范围、约束和完成定义。',
-      100
-    ),
-    createTask(
-      `${taskPrefix}-execute`,
-      workstream.executionTitle,
-      workstream.primaryType,
-      workstream.executionDescription,
-      80,
-      [`${taskPrefix}-context`]
-    ),
-    createTask(
-      `${taskPrefix}-verify`,
-      '验证完成标准并形成结论',
-      'verification',
-      '运行必要检查、对照 completion criteria 判断 PASS / GAP / ESCALATE。',
-      60,
-      [`${taskPrefix}-execute`]
-    ),
+  const tasks: Task[] = customTasks ?? (parallelCount !== null ? buildParallelTasks(parallelCount, mission).map((t) => ({ ...t, phase: 'build' })) : [
+    {
+      ...createTask(
+        `${taskPrefix}-context`,
+        '收集上下文与输入边界',
+        'analysis',
+        '读取 mission 目标、现有文档和相关工件，确认范围、约束和完成定义。',
+        100
+      ),
+      phase: 'research',
+    },
+    {
+      ...createTask(
+        `${taskPrefix}-execute`,
+        workstream.executionTitle,
+        workstream.primaryType,
+        workstream.executionDescription,
+        80,
+        [`${taskPrefix}-context`]
+      ),
+      phase: 'build',
+    },
+    {
+      ...createTask(
+        `${taskPrefix}-verify`,
+        '验证完成标准并形成结论',
+        'verification',
+        '运行必要检查、对照 completion criteria 判断 PASS / GAP / ESCALATE。',
+        60,
+        [`${taskPrefix}-execute`]
+      ),
+      phase: 'verify',
+    },
   ]);
 
   const planMarkdown = [
@@ -437,7 +448,8 @@ function buildPlannedOutput(
     '## Task Breakdown',
     ...tasks.map((task, index) => {
       const dependsText = task.dependsOn && task.dependsOn.length > 0 ? ` | dependsOn=${task.dependsOn.join(',')}` : '';
-      return `${index + 1}. ${task.taskId} | type=${task.type} | status=${task.status}${dependsText}\n   - ${task.description ?? task.title}`;
+      const phaseText = task.phase ? ` | phase=${task.phase}` : '';
+      return `${index + 1}. ${task.taskId} | type=${task.type} | status=${task.status}${phaseText}${dependsText}\n   - ${task.description ?? task.title}`;
     }),
     '',
     '## Notes',
@@ -474,6 +486,8 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       chatId: mission.owner?.chatId ?? '',
     });
     for (const task of output.tasks) {
+      // 自动推导并标注 phase
+      task.phase = derivePhaseFromTask(task);
       const matched = matchAgentForTask(task, agents);
       if (matched) {
         task.agent = matched.agentId;

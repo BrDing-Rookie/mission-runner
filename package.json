@@ -19,6 +19,8 @@
     "mission-dispatch": "tsx scripts/mission-dispatch.ts",
     "mission-verify": "tsx scripts/mission-verify.ts",
     "mission-write-artifact": "tsx scripts/mission-write-artifact.ts",
+    "mission-dashboard": "tsx scripts/mission-dashboard.ts",
+    "mission-list": "tsx scripts/mission-list.ts",
     "task-update": "tsx scripts/task-update.ts",
     "task-add": "tsx scripts/task-add.ts",
     "watchdog": "tsx scripts/mission-watchdog.ts",

@@ -63,6 +63,17 @@ export type TaskType =
   | 'notification'
   | 'external_wait';
 
+/** 任务阶段标签 — 用于 Dashboard 分组展示 */
+export type TaskPhase =
+  | 'research'
+  | 'analysis'
+  | 'implement'
+  | 'test'
+  | 'review'
+  | 'deploy'
+  | 'document'
+  | 'general';
+
 // ==================== Verification ====================
 
 export type VerificationStatus =
@@ -118,6 +129,8 @@ export interface Task {
   maxRetries?: number;
   lastError?: string | null;
   backgroundProcessId?: string | null;
+  /** 展示层分组标签（如 research / design / implement / test / review），仅用于 dashboard 聚合，不影响执行逻辑 */
+  phase?: string;
   config?: Record<string, unknown>;
 }
 

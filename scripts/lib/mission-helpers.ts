@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { appendEvent, readMission, safeWriteFile, writeMission } from './fs-utils.ts';
 import { commitMissionUpdate } from './mission-commit.ts';
-import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskStatus, TaskType, VerificationStatus } from './types.ts';
+import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskPhase, TaskStatus, TaskType, VerificationStatus } from './types.ts';
 
 export interface MissionCliArgs { missionsDir: string; missionId: string; dryRun: boolean; }
 export function parseMissionCliArgs(argv: string[]): MissionCliArgs {
@@ -100,4 +100,18 @@ export function setMissionStatus(mission: Mission, status: MissionStatus): Missi
 }
 export function setVerification(mission: Mission, verification: { status: VerificationStatus; summary: string; gaps: string[]; criteriaResults?: Array<{ criterionId: string; passed: boolean; reason: string }> }): Mission {
   const timestamp = nowIso(); return { ...mission, updatedAt: timestamp, verification: { status: verification.status, lastCheckedAt: timestamp, summary: verification.summary, gaps: verification.gaps, criteriaResults: verification.criteriaResults } };
+}
+
+/** 根据 task type 自动推导 Dashboard 分组 phase */
+export function derivePhaseFromTask(task: Task): TaskPhase {
+  const map: Record<string, TaskPhase> = {
+    research: 'research',
+    analysis: 'analysis',
+    code: 'implement',
+    test: 'test',
+    review: 'review',
+    deploy: 'deploy',
+    document: 'document',
+  };
+  return map[task.type] ?? 'general';
 }

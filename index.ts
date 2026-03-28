@@ -1,6 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/core";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-runtime";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,13 +11,12 @@ const LOCAL_TSX = join(__dirname, "node_modules", ".bin", "tsx");
 
 /**
  * Execute a mission-runner script via tsx and return the result.
- * Uses the project-local tsx binary to avoid PATH dependency.
+ * Uses execFileSync (no shell) to avoid shell-injection risks from user-supplied args.
  */
 function runScript(scriptName: string, args: string[]): { exitCode: number; output: string } {
   const tsxBin = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
-  const cmd = `${tsxBin} ${join(SCRIPTS_DIR, scriptName)} ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`;
   try {
-    const output = execSync(cmd, {
+    const output = execFileSync(tsxBin, [join(SCRIPTS_DIR, scriptName), ...args], {
       cwd: __dirname,
       encoding: "utf-8",
       timeout: 120_000,

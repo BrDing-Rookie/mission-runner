@@ -126,6 +126,10 @@
       "type": ["string", "null"],
       "description": "关联的后台进程ID"
     },
+    "phase": {
+      "type": "string",
+      "description": "展示层分组标签，用于 dashboard 按阶段聚合展示。不影响执行逻辑。"
+    },
     "config": {
       "type": "object",
       "description": "任务特定配置",
