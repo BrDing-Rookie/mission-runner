@@ -21,6 +21,7 @@
     "allowImportingTsExtensions": true
   },
   "include": [
+    "index.ts",
     "scripts/**/*",
     "schemas/**/*"
   ],

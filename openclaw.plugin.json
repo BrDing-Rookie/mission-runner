@@ -1,0 +1,15 @@
+{
+  "id": "mission-runner",
+  "skills": ["skills/mission-controller"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "missionsDir": {
+        "type": "string",
+        "description": "Missions storage directory (relative to workspace root)",
+        "default": "missions"
+      }
+    }
+  }
+}
