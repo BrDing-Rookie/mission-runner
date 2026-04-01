@@ -4,6 +4,9 @@ import { appendEvent, readMission, safeWriteFile, writeMission } from './fs-util
 import { commitMissionUpdate } from './mission-commit.ts';
 import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskPhase, TaskStatus, TaskType, VerificationStatus } from './types.ts';
 
+// Re-export for convenience
+export type { TaskType } from './types.ts';
+
 export interface MissionCliArgs { missionsDir: string; missionId: string; dryRun: boolean; }
 export function parseMissionCliArgs(argv: string[]): MissionCliArgs {
   const args: MissionCliArgs = { missionsDir: './missions', missionId: '', dryRun: false };
@@ -45,6 +48,7 @@ function inferTaskType(title: string): TaskType {
   if (s.includes('review')) return 'review';
   if (s.includes('document') || s.includes('plan')) return 'document';
   if (s.includes('code') || s.includes('implement')) return 'code';
+  if (s.includes('research') || s.includes('调研')) return 'research';
   return 'analysis';
 }
 export function buildDefaultPlan(mission: Mission): PlanDraft {
@@ -102,6 +106,24 @@ export function setVerification(mission: Mission, verification: { status: Verifi
   const timestamp = nowIso(); return { ...mission, updatedAt: timestamp, verification: { status: verification.status, lastCheckedAt: timestamp, summary: verification.summary, gaps: verification.gaps, criteriaResults: verification.criteriaResults } };
 }
 
+/** 构建标准 TASK-ENVELOPE 文本，用于跨 Agent 派发 */
+export function buildTaskEnvelope(task: Task, mission: Mission, agentId: string): string {
+  const lines = [
+    '---TASK-ENVELOPE---',
+    `RUN: ${mission.missionId}`,
+    `TASK: ${task.taskId}`,
+    `BACKEND: ${agentId}`,
+    `WORKDIR: ${mission.metadata?.workdir ?? ''}`,
+    `FOCUS: ${task.title}`,
+    `EPOCH: ${mission.currentIteration ?? 1}`,
+    `TIMEOUT: ${task.timeout ?? 600}s`,
+    '---END-ENVELOPE---',
+    '',
+    task.description ?? task.title,
+  ];
+  return lines.join('\n');
+}
+
 /** 根据 task type 自动推导 Dashboard 分组 phase */
 export function derivePhaseFromTask(task: Task): TaskPhase {
   const map: Record<string, TaskPhase> = {
@@ -114,4 +136,138 @@ export function derivePhaseFromTask(task: Task): TaskPhase {
     document: 'document',
   };
   return map[task.type] ?? 'general';
+}
+
+// ==================== Parallel / Serial / JSON Task Builders ====================
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24) || 'task';
+}
+
+/**
+ * 生成 N 个并行 task，dependsOn 为空，共享同一个 phase。
+ */
+export function buildParallelTasks(count: number, mission: Mission): Task[] {
+  const createdAt = nowIso();
+  const prefix = slugify(mission.title || mission.goal || mission.missionId);
+  return Array.from({ length: count }, (_, index) => {
+    const lane = index + 1;
+    const task: Task = {
+      taskId: `${prefix}-lane-${lane}`,
+      title: `并行分支 ${lane}/${count}`,
+      description: `独立执行分支 ${lane}，与其他分支无依赖。`,
+      type: 'research',
+      status: 'READY',
+      dependsOn: [],
+      priority: 100 - index,
+      createdAt,
+      startedAt: null,
+      endedAt: null,
+      estimatedDuration: null,
+      timeout: null,
+      resultSummary: null,
+      artifacts: [],
+      retryCount: 0,
+      maxRetries: 2,
+      lastError: null,
+      backgroundProcessId: null,
+      config: {},
+    };
+    task.phase = derivePhaseFromTask(task);
+    return task;
+  });
+}
+
+/**
+ * 生成 stages.length 个串行 task，每个依赖前一个。
+ */
+export function buildSerialTasks(stages: string[], mission: Mission): Task[] {
+  if (stages.length === 0) return [];
+  const createdAt = nowIso();
+  const prefix = slugify(mission.title || mission.goal || mission.missionId);
+  return stages.map((title, index) => {
+    const taskId = `${prefix}-step-${index + 1}`;
+    const dependsOn = index === 0 ? [] : [`${prefix}-step-${index}`];
+    const task: Task = {
+      taskId,
+      title,
+      description: title,
+      type: inferTaskType(title),
+      status: index === 0 ? 'READY' : 'PENDING',
+      dependsOn,
+      priority: 100 - index * 10,
+      createdAt,
+      startedAt: null,
+      endedAt: null,
+      estimatedDuration: null,
+      timeout: null,
+      resultSummary: null,
+      artifacts: [],
+      retryCount: 0,
+      maxRetries: 2,
+      lastError: null,
+      backgroundProcessId: null,
+      config: {},
+    };
+    task.phase = derivePhaseFromTask(task);
+    return task;
+  });
+}
+
+type TaskJsonInput = Partial<Task> & { taskId: string; title: string; type: TaskType };
+
+/**
+ * 解析 JSON 输入并补全默认字段（status、priority、retryCount 等）。
+ */
+export function buildTasksFromJSON(jsonInput: string, _mission: Mission): Task[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonInput);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse tasks JSON: ${message}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('Tasks JSON must be an array');
+  }
+
+  const createdAt = nowIso();
+  return (parsed as TaskJsonInput[]).map((raw, index) => {
+    if (!raw || typeof raw !== 'object') {
+      throw new Error(`Task at index ${index} must be an object`);
+    }
+    if (!raw.taskId?.trim()) throw new Error(`Task at index ${index} is missing taskId`);
+    if (!raw.title?.trim()) throw new Error(`Task ${raw.taskId} is missing title`);
+    if (!raw.type) throw new Error(`Task ${raw.taskId} is missing type`);
+
+    const dependsOn = Array.isArray(raw.dependsOn) ? raw.dependsOn : [];
+    const task: Task = {
+      taskId: raw.taskId.trim(),
+      title: raw.title.trim(),
+      description: raw.description ?? raw.title.trim(),
+      type: raw.type,
+      status: raw.status ?? (dependsOn.length > 0 ? 'PENDING' : 'READY'),
+      dependsOn,
+      priority: raw.priority ?? 10,
+      createdAt: raw.createdAt ?? createdAt,
+      startedAt: raw.startedAt ?? null,
+      endedAt: raw.endedAt ?? null,
+      estimatedDuration: raw.estimatedDuration ?? null,
+      timeout: raw.timeout ?? null,
+      resultSummary: raw.resultSummary ?? null,
+      artifacts: raw.artifacts ?? [],
+      retryCount: raw.retryCount ?? 0,
+      maxRetries: raw.maxRetries ?? 2,
+      lastError: raw.lastError ?? null,
+      backgroundProcessId: raw.backgroundProcessId ?? null,
+      config: raw.config ?? {},
+    };
+    task.phase = raw.phase ?? derivePhaseFromTask(task);
+    return task;
+  });
 }

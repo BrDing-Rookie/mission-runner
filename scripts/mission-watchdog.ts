@@ -13,9 +13,14 @@ import {
   type WatchdogCheckResult,
   type WatchdogConfig,
 } from './lib/types.ts';
+import { runVerify } from './mission-verify.ts';
 
-function parseArgs(argv: string[]): WatchdogConfig {
-  const config: WatchdogConfig = { ...DEFAULT_WATCHDOG_CONFIG };
+interface ExtendedWatchdogConfig extends WatchdogConfig {
+  autoVerify: boolean;
+}
+
+function parseArgs(argv: string[]): ExtendedWatchdogConfig {
+  const config: ExtendedWatchdogConfig = { ...DEFAULT_WATCHDOG_CONFIG, autoVerify: false };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -34,6 +39,9 @@ function parseArgs(argv: string[]): WatchdogConfig {
         break;
       case '--verbose':
         config.verbose = true;
+        break;
+      case '--auto-verify':
+        config.autoVerify = true;
         break;
       case '--task-timeout-ms': {
         const value = Number(argv[index + 1]);
@@ -325,6 +333,42 @@ function applyResultToMission(
   };
 }
 
+/**
+ * Auto-verify: if mission is RUNNING with all tasks terminal and no active background,
+ * run verification immediately. Idempotent: skips if mission already in terminal state.
+ */
+function tryAutoVerify(config: ExtendedWatchdogConfig, mission: Mission): { verified: boolean; result?: ReturnType<typeof runVerify> } {
+  if (!config.autoVerify) return { verified: false };
+  // Idempotent guard: skip if mission is already terminal
+  if (TERMINAL_STATUSES.includes(mission.status)) return { verified: false };
+  // Only auto-verify when mission is RUNNING/VERIFYING with all-terminal tasks
+  if (mission.status !== 'RUNNING' && mission.status !== 'VERIFYING') return { verified: false };
+
+  const tasks = mission.tasks ?? [];
+  if (tasks.length === 0) return { verified: false };
+  const nonTerminal = tasks.filter((t) => !['COMPLETED', 'FAILED', 'SKIPPED'].includes(t.status));
+  if (nonTerminal.length > 0) return { verified: false };
+
+  // Also check no active background processes
+  const bgProcesses = mission.backgroundProcesses ?? [];
+  const runningBg = bgProcesses.filter((p) => p.status === 'RUNNING');
+  if (runningBg.length > 0) return { verified: false };
+
+  console.log(`[mission-watchdog] auto-verify triggered | missionId=${mission.missionId} | status=${mission.status}`);
+  try {
+    const result = runVerify({
+      missionsDir: config.missionsDir,
+      missionId: mission.missionId,
+      dryRun: config.dryRun,
+    });
+    return { verified: true, result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[mission-watchdog] auto-verify failed | missionId=${mission.missionId} | error=${message}`);
+    return { verified: false };
+  }
+}
+
 function logMissionResult(result: WatchdogCheckResult): void {
   const parts = [
     `[${result.action}]`,
@@ -395,6 +439,20 @@ function main(): number {
         console.log(
           `[WRITE] ${mission.missionId} mission=${writeOk ? 'ok' : 'fail'} event=${eventOk ? 'ok' : 'fail'}`
         );
+      }
+
+      // Auto-verify: if all tasks are terminal and mission is not terminal, run verify
+      const autoResult = tryAutoVerify(config, updatedMission);
+      if (autoResult.verified && autoResult.result) {
+        console.log(
+          `[mission-watchdog] auto-verify done | missionId=${autoResult.result.missionId} | verification=${autoResult.result.verificationStatus} | status=${autoResult.result.missionStatus} | changed=${autoResult.result.changed}`
+        );
+      }
+    } else {
+      // Dry-run: still check if auto-verify would fire (for logging)
+      const autoResult = tryAutoVerify(config, mission);
+      if (autoResult.verified) {
+        console.log(`[mission-watchdog] auto-verify would trigger (dry-run) | missionId=${mission.missionId}`);
       }
     }
   }

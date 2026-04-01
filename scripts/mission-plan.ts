@@ -18,6 +18,7 @@ interface PlanArgs {
   criteriaFile: string | null;
   criteriaJson: string | null;
   parallel: number | null;
+  template: string | null;
 }
 
 interface PlannedOutput {
@@ -38,6 +39,7 @@ function parseArgs(argv: string[]): PlanArgs {
     criteriaFile: null,
     criteriaJson: null,
     parallel: null,
+    template: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -92,6 +94,12 @@ function parseArgs(argv: string[]): PlanArgs {
         }
         break;
       }
+      case '--template':
+        if (next) {
+          args.template = next;
+          index += 1;
+        }
+        break;
       default:
         break;
     }
@@ -105,9 +113,9 @@ function assertRequired(args: PlanArgs): void {
     throw new Error('Missing required --mission-id');
   }
 
-  const customTaskSources = [args.tasksFile, args.tasksJson, args.parallel !== null ? 'parallel' : null].filter(Boolean).length;
+  const customTaskSources = [args.tasksFile, args.tasksJson, args.parallel !== null ? 'parallel' : null, args.template].filter(Boolean).length;
   if (customTaskSources > 1) {
-    throw new Error('Use only one of --tasks-file, --tasks-json, or --parallel');
+    throw new Error('Use only one of --tasks-file, --tasks-json, --parallel, or --template');
   }
 
   if (args.criteriaFile && args.criteriaJson) {
@@ -143,12 +151,46 @@ function createTask(taskId: string, title: string, type: TaskType, description: 
   };
 }
 
+function resolveTemplate(templateName: string): string {
+  const templates: Record<string, string> = {
+    'serial-3': JSON.stringify([
+      { taskId: 'T1-context', title: '收集上下文与输入边界', type: 'analysis', dependsOn: [] },
+      { taskId: 'T2-execute', title: '执行核心任务', type: 'code', dependsOn: ['T1-context'] },
+      { taskId: 'T3-verify', title: '验证完成标准并形成结论', type: 'verification', dependsOn: ['T2-execute'] },
+    ]),
+    'parallel-research': JSON.stringify([
+      { taskId: 'T1-researcher-1', title: '调研方向 1', type: 'research', dependsOn: [] },
+      { taskId: 'T2-researcher-2', title: '调研方向 2', type: 'research', dependsOn: [] },
+      { taskId: 'T3-researcher-3', title: '调研方向 3', type: 'research', dependsOn: [] },
+      { taskId: 'T4-synthesis', title: '综合分析', type: 'analysis', dependsOn: ['T1-researcher-1', 'T2-researcher-2', 'T3-researcher-3'] },
+      { taskId: 'T5-report', title: '输出报告', type: 'document', dependsOn: ['T4-synthesis'] },
+    ]),
+    'parallel-build': JSON.stringify([
+      { taskId: 'T1-design', title: '设计', type: 'analysis', dependsOn: [] },
+      { taskId: 'T2-frontend', title: '前端实现', type: 'code', dependsOn: ['T1-design'] },
+      { taskId: 'T3-backend', title: '后端实现', type: 'code', dependsOn: ['T1-design'] },
+      { taskId: 'T4-test', title: '集成测试', type: 'test', dependsOn: ['T2-frontend', 'T3-backend'] },
+      { taskId: 'T5-review', title: '代码审查', type: 'review', dependsOn: ['T4-test'] },
+    ]),
+  };
+
+  const json = templates[templateName];
+  if (!json) {
+    const available = Object.keys(templates).join(', ');
+    throw new Error(`Unknown template: ${templateName}. Available templates: ${available}`);
+  }
+  return json;
+}
+
 function parseCustomTasks(args: PlanArgs): TaskInput[] | null {
+  // Template resolution produces JSON, then falls through to normal parsing
   const raw = args.tasksJson
     ? args.tasksJson
     : args.tasksFile
       ? readFileSync(args.tasksFile, 'utf-8')
-      : null;
+      : args.template
+        ? resolveTemplate(args.template)
+        : null;
 
   if (!raw) {
     return null;

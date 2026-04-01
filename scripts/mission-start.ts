@@ -16,6 +16,9 @@ export interface MissionStartArgs {
   dryRun: boolean;
   ownerArgs: string[];
   planArgs: string[];
+  dispatchArgs: string[];
+  autoSpawn: boolean;
+  agentMap?: string;
 }
 
 export interface MissionStartResult {
@@ -23,6 +26,7 @@ export interface MissionStartResult {
   missionPath: string;
   steps: Array<{ step: 'create' | 'plan' | 'dispatch'; ok: boolean }>;
   dryRun: boolean;
+  dispatchLogs?: string[];
 }
 
 function parseArgs(argv: string[]): MissionStartArgs {
@@ -33,6 +37,8 @@ function parseArgs(argv: string[]): MissionStartArgs {
     dryRun: false,
     ownerArgs: [],
     planArgs: [],
+    dispatchArgs: [],
+    autoSpawn: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -66,6 +72,23 @@ function parseArgs(argv: string[]): MissionStartArgs {
       case '--criteria-json':
       case '--parallel':
         if (next) { args.planArgs.push(arg, next); i += 1; }
+        break;
+      case '--auto-spawn':
+        args.autoSpawn = true;
+        args.dispatchArgs.push('--auto-spawn');
+        break;
+      case '--agent-map':
+        if (next) {
+          args.agentMap = next;
+          args.dispatchArgs.push('--agent-map', next);
+          i += 1;
+        }
+        break;
+      case '--timeout-seconds':
+        if (next) {
+          args.dispatchArgs.push('--timeout-seconds', next);
+          i += 1;
+        }
         break;
       case '--dry-run':
         args.dryRun = true;
@@ -129,16 +152,21 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     const dispatchRun = captureStdout(() => dispatchMain([
       '--missions-dir', effectiveMissionsDir,
       '--mission-id', missionId,
+      ...args.dispatchArgs,
     ]));
     steps.push({ step: 'dispatch', ok: dispatchRun.result === 0 });
     if (dispatchRun.result !== 0) throw new Error(`mission-dispatch failed for ${missionId}`);
 
-    console.log(JSON.stringify({
+    const result: MissionStartResult = {
       missionId,
       missionPath: args.dryRun ? join(args.missionsDir, missionId, 'mission.json') : missionPath,
       steps,
       dryRun: args.dryRun,
-    } satisfies MissionStartResult, null, 2));
+    };
+    if (args.autoSpawn) {
+      result.dispatchLogs = dispatchRun.logs;
+    }
+    console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
