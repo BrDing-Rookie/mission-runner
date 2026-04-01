@@ -135,7 +135,7 @@ const missionRunAction = createMissionTool({
 const missionDispatch = createMissionTool({
   name: "mission_dispatch",
   label: "Mission Dispatch",
-  description: "Dispatch READY tasks in a mission to execution.",
+  description: "Dispatch READY tasks in a mission to execution. Uses three-level fallback strategy: L1 (mention in chat) → L2 (create session + mention) → L3 (spawn fallback). Returns dispatch summary with level breakdown.",
   script: "mission-dispatch.ts",
   buildArgs: (p, dir) => [
     "--missions-dir", dir,
