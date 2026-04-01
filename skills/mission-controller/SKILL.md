@@ -18,7 +18,7 @@ metadata:
 `mission-controller` 是 Mission Runner 插件的核心技能，负责：
 
 1. **规划（Planning）**：将用户目标拆解为可执行子任务
-2. **派发（Dispatch）**：根据任务类型选择执行路径
+2. **派发（Dispatch）**：三级回退策略派发（L1 群聊 @mention → L2 创建 session 后 @mention → L3 dispatch queue 兜底），无 agent 任务走 background/cron 路径
 3. **看守（Watchdog）**：监控执行进度，处理 stuck/恢复/重试
 4. **验证（Verification）**：按完成标准验收，识别伪完成
 5. **恢复（Recovery）**：决策下一步行动（重试/迭代/升级）
@@ -178,8 +178,8 @@ type ControllerAction =
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  DISPATCH │  派发子任务到不同执行路径                       │
-│           │  session / background / cron                    │
+│  DISPATCH │  三级回退派发（L1 @mention → L2 session+@ → L3 queue）│
+│           │  无 agent 任务走 background/cron 路径                │
 └───────────────────────────┬─────────────────────────────────┘
                             │
               ┌─────────────┼─────────────┐
@@ -318,7 +318,7 @@ const result = await skill('mission-controller', {
 | 组件 | 交互方式 | 说明 |
 |------|----------|------|
 | `mission-plan.ts` | 调用 | 生成初始计划 |
-| `mission-dispatch.ts` | 读取产物 | 根据 plan 派发任务 |
+| `mission-dispatch.ts` | 读取产物 | 三级回退派发 + autoSpawn/agentMap |
 | `mission-watchdog.ts` | 调用 | 异常时决策 |
 | `mission-verify.ts` | 调用 | 验证完成标准 |
 | `mission-notify.ts` | 被触发 | 通过 action 触发通知 |
