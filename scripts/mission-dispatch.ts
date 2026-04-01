@@ -3,7 +3,10 @@
 import { pathToFileURL } from 'url';
 import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { buildTaskEnvelope, deriveMissionStatus, nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
+import { dispatchTaskToAgent, type DispatchResult, type DispatchSummary } from './lib/mission-dispatch-agent.ts';
 import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
+
+// --- Agent Map (task type → default agent) ---
 
 const DEFAULT_AGENT_MAP: Record<string, string> = {
   research: 'codex',
@@ -14,6 +17,8 @@ const DEFAULT_AGENT_MAP: Record<string, string> = {
   test: 'codex',
   verification: 'rd-review',
 };
+
+// --- CLI Args ---
 
 interface DispatchCliArgs {
   missionsDir: string;
@@ -49,12 +54,16 @@ function parseDispatchCliArgs(argv: string[]): DispatchCliArgs {
   return args;
 }
 
+// --- Spawn instruction (for autoSpawn mode) ---
+
 interface SpawnInstruction {
   taskId: string;
   agentId: string;
   taskType: string;
   envelope: string;
 }
+
+// --- Helpers ---
 
 function isReady(task: Task): boolean {
   return task.status === 'READY';
@@ -63,6 +72,65 @@ function isReady(task: Task): boolean {
 function isBackgroundCandidate(task: Task): boolean {
   return ['code', 'test', 'deploy', 'external_wait'].includes(task.type);
 }
+
+/**
+ * 检查任务是否需要走 agent 派发路径。
+ * 有 agent 分配的任务走三级回退派发，无 agent 的任务走原有的 background/running 逻辑。
+ */
+function needsAgentDispatch(task: Task): boolean {
+  return !!(task.agent ?? task.config?.agentId);
+}
+
+/**
+ * 将 DispatchResult 应用到 Task 上，更新 config 和 sessionKey。
+ */
+function applyDispatchResult(task: Task, result: DispatchResult): Task {
+  const updatedConfig = {
+    ...(task.config ?? {}),
+    dispatchLevel: result.dispatchLevel,
+    dispatchedAt: result.timestamp,
+    dispatchSuccess: result.success,
+  };
+  if (result.error) {
+    updatedConfig.dispatchError = result.error;
+  }
+
+  return {
+    ...task,
+    sessionKey: result.sessionKey ?? task.sessionKey,
+    config: updatedConfig,
+  };
+}
+
+/**
+ * 从派发结果列表构建摘要。
+ */
+function buildDispatchSummary(results: DispatchResult[]): DispatchSummary {
+  const summary: DispatchSummary = {
+    totalReady: results.length,
+    level1Success: 0,
+    level2Success: 0,
+    level3Fallback: 0,
+    failed: 0,
+    results,
+  };
+
+  for (const r of results) {
+    if (!r.success) {
+      summary.failed++;
+      continue;
+    }
+    switch (r.dispatchLevel) {
+      case 1: summary.level1Success++; break;
+      case 2: summary.level2Success++; break;
+      case 3: summary.level3Fallback++; break;
+    }
+  }
+
+  return summary;
+}
+
+// --- Main ---
 
 export function main(argv: string[] = process.argv.slice(2)): number {
   try {
@@ -76,11 +144,14 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     }
 
     const timestamp = nowIso();
-    const startedTaskIds = readyTasks.map((task) => task.taskId);
     const runningTaskIds: string[] = [];
     const backgroundTaskIds: string[] = [];
+    const startedTaskIds: string[] = [];
+    const failedDispatchTaskIds: string[] = [];
     const backgroundProcesses: BackgroundProcess[] = [...(mission.backgroundProcesses ?? [])];
 
+    // 派发结果收集
+    const dispatchResults: DispatchResult[] = [];
     const spawnInstructions: SpawnInstruction[] = [];
 
     const updatedTasks: Task[] = (mission.tasks ?? []).map((task): Task => {
@@ -88,16 +159,56 @@ export function main(argv: string[] = process.argv.slice(2)): number {
         return task;
       }
 
-      // Build spawn instruction for auto-spawn mode
+      // Build spawn instruction for auto-spawn mode (public-deliverables feature)
       if (args.autoSpawn) {
-        const agentId = args.agentMap[task.type] ?? task.type;
+        const agentId = args.agentMap[task.type] ?? task.agent ?? task.type;
         const envelope = buildTaskEnvelope(task, mission, agentId);
         spawnInstructions.push({ taskId: task.taskId, agentId, taskType: task.type, envelope });
       }
 
+      // 有 agent 分配的任务 → 走三级回退派发策略 (extensions feature)
+      if (needsAgentDispatch(task)) {
+        // 幂等保护：已有 sessionKey 的任务直接标记 RUNNING
+        if (task.sessionKey) {
+          runningTaskIds.push(task.taskId);
+          startedTaskIds.push(task.taskId);
+          return {
+            ...task,
+            status: 'RUNNING',
+            startedAt: timestamp,
+          };
+        }
+
+        const result = dispatchTaskToAgent(task, mission, args.missionsDir);
+        dispatchResults.push(result);
+
+        const updatedTask = applyDispatchResult(task, result);
+
+        if (result.success) {
+          runningTaskIds.push(task.taskId);
+          startedTaskIds.push(task.taskId);
+          return {
+            ...updatedTask,
+            status: 'RUNNING',
+            startedAt: timestamp,
+          };
+        }
+
+        // 派发全部失败，任务保持 READY 等待重试
+        failedDispatchTaskIds.push(task.taskId);
+        console.error(`[mission-dispatch] dispatch failed, task remains READY | taskId=${task.taskId}`);
+        return {
+          ...updatedTask,
+          lastError: result.error,
+          status: 'READY',
+        };
+      }
+
+      // 无 agent 分配的任务 → 走原有的 background/running 逻辑
       if (isBackgroundCandidate(task)) {
         const processId = `bg-${mission.missionId}-${task.taskId}`;
         backgroundTaskIds.push(task.taskId);
+        startedTaskIds.push(task.taskId);
         backgroundProcesses.push({
           processId,
           taskId: task.taskId,
@@ -110,17 +221,18 @@ export function main(argv: string[] = process.argv.slice(2)): number {
           ...task,
           status: 'WAITING_BACKGROUND',
           startedAt: timestamp,
-          agent: args.autoSpawn ? (args.agentMap[task.type] ?? null) : task.agent,
+          agent: args.autoSpawn ? (args.agentMap[task.type] ?? task.agent) : task.agent,
           backgroundProcessId: processId,
         };
       }
 
       runningTaskIds.push(task.taskId);
+      startedTaskIds.push(task.taskId);
       return {
         ...task,
         status: 'RUNNING',
         startedAt: timestamp,
-        agent: args.autoSpawn ? (args.agentMap[task.type] ?? null) : task.agent,
+        agent: args.autoSpawn ? (args.agentMap[task.type] ?? task.agent) : task.agent,
       };
     });
 
@@ -134,13 +246,21 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       backgroundProcesses,
     };
 
-    // statusFrom, statusTo, dryRun are already set by commitMissionUpdate internally;
-    // only include dispatch-specific fields in eventExtras to avoid duplication.
+    // 构建派发摘要
+    const summary = buildDispatchSummary(dispatchResults);
+
     const eventExtras: Record<string, unknown> = {
       startedTaskIds,
       runningTaskIds,
       backgroundTaskIds,
       backgroundProcessCount: backgroundProcesses.length,
+      dispatchSummary: summary,
+      dispatchLevelBreakdown: {
+        level1: summary.level1Success,
+        level2: summary.level2Success,
+        level3: summary.level3Fallback,
+        failed: summary.failed,
+      },
     };
 
     if (args.autoSpawn && spawnInstructions.length > 0) {
@@ -171,7 +291,7 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       return 0;
     }
 
-    console.log(`[mission-dispatch] dispatched | missionId=${mission.missionId} | started=${startedTaskIds.join(',') || 'none'} | running=${runningTaskIds.join(',') || 'none'} | background=${backgroundTaskIds.join(',') || 'none'} | status=${updatedMission.status}`);
+    console.log(`[mission-dispatch] dispatched | missionId=${mission.missionId} | started=${startedTaskIds.join(',') || 'none'} | running=${runningTaskIds.join(',') || 'none'} | background=${backgroundTaskIds.join(',') || 'none'} | dispatch=L1:${summary.level1Success}/L2:${summary.level2Success}/L3:${summary.level3Fallback}/fail:${summary.failed} | status=${updatedMission.status}`);
 
     if (args.autoSpawn && spawnInstructions.length > 0) {
       console.log('');
