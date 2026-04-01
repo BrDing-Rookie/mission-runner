@@ -6,10 +6,9 @@
  * Level 3（兜底）: 写 dispatch queue 文件 — 由 orchestrator 通过 sessions_spawn 执行
  */
 
-import { execSync } from 'child_process';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { escapeShellArg } from './shell-utils.ts';
 import type { Mission, Task } from './types.ts';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -53,16 +52,14 @@ export interface DispatchSummary {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function sleep(ms: number): void {
-  execSync(`sleep ${Math.max(0, Math.round(ms / 1000))}`, { stdio: 'pipe' });
-}
+// sleep() removed — use setTimeout/Promise if needed
 
 /**
  * 安全执行 CLI 命令，返回 { success, output, error }。
  */
-function safeExec(command: string, timeoutMs: number = 10_000): { success: boolean; output: string; error?: string } {
+function safeExec(argv: string[], timeoutMs: number = 10_000): { success: boolean; output: string; error?: string } {
   try {
-    const output = execSync(command, {
+    const output = execFileSync(argv[0], argv.slice(1), {
       timeout: timeoutMs,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -98,7 +95,7 @@ export function checkAgentSession(agentId: string): AgentSessionInfo[] {
   }
 
   const result = safeExec(
-    `openclaw sessions --agent ${escapeShellArg(agentId)} --json`,
+    ['openclaw', 'sessions', '--agent', agentId, '--json'],
     15_000,
   );
 
@@ -161,7 +158,7 @@ export function mentionInDiscord(
   const fullMessage = `${message}\n${agentMentionTag}`;
 
   const result = safeExec(
-    `openclaw message send --account discord-rd-lead --channel ${escapeShellArg(channelType)} --target ${escapeShellArg(channelId)} --message ${escapeShellArg(fullMessage)}`,
+    ['openclaw', 'message', 'send', '--account', 'discord-rd-lead', '--channel', channelType, '--target', channelId, '--message', fullMessage],
     MENTION_RESPONSE_TIMEOUT_MS,
   );
 
@@ -190,7 +187,7 @@ export function createAgentSession(agentId: string): string | null {
 
   const initMessage = 'Mission dispatch: session init for agent ' + agentId + '. Stand by for task.';
   const result = safeExec(
-    'openclaw agent --agent ' + escapeShellArg(agentId) + ' --message ' + escapeShellArg(initMessage) + ' --json --timeout 30',
+    ['openclaw', 'agent', '--agent', agentId, '--message', initMessage, '--json', '--timeout', '30'],
     35_000,
   );
 
@@ -219,7 +216,7 @@ export function createAgentSession(agentId: string): string | null {
  *
  * @param task - 待派发的 task
  * @param missionId - 所属 mission ID
- * @returns spawn 的 session key，失败返回 null
+ * @returns queue file path on success, null on failure
  */
 export function spawnFallback(task: Task, missionId: string): string | null {
   console.log(`[mission-dispatch-agent] spawnFallback: writing dispatch queue entry | taskId=${task.taskId}`);
@@ -242,15 +239,13 @@ export function spawnFallback(task: Task, missionId: string): string | null {
 
   try {
     // Create queue directory if not exists
-    if (!existsSync(queueDir)) {
-      execSync(`mkdir -p '${queueDir}'`, { stdio: 'pipe' });
-    }
+    mkdirSync(queueDir, { recursive: true });
     writeFileSync(queueFile, JSON.stringify(queueEntry, null, 2), 'utf-8');
     console.log(`[mission-dispatch-agent] spawnFallback: queued to ${queueFile}`);
-    return null; // L3 queued, not a session key
+    return queueFile; // Return path on success
   } catch (err) {
     console.error(`[mission-dispatch-agent] spawnFallback failed: ${err}`);
-    return null;
+    return null; // Return null on failure
   }
 }
 
@@ -365,17 +360,7 @@ export function dispatchTaskToAgent(task: Task, mission: Mission, missionsDir: s
       timestamp,
     };
   }
-  // queue 写入成功但返回 null → 也算成功（已写入 queue 文件）
-  console.log(`[mission-dispatch-agent] L3 queued | taskId=${task.taskId} | agent=${agentId}`);
-  return {
-    taskId: task.taskId,
-    dispatchLevel: 3,
-    success: true,
-    agentId,
-    timestamp,
-  };
-
-  // 全部失败
+  // All levels failed
   console.error(`[mission-dispatch-agent] ALL LEVELS FAILED | taskId=${task.taskId} | agent=${agentId}`);
   return {
     taskId: task.taskId,
