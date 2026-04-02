@@ -5,8 +5,7 @@
  * 供 mission-plan.ts 为 task 分配 Agent。
  */
 
-import { execSync } from 'child_process';
-import { escapeShellArg } from './shell-utils.ts';
+import { execFileSync } from 'child_process';
 import type { Task } from './types.ts';
 
 /** 群聊内可用的 Agent 信息 */
@@ -44,10 +43,11 @@ export function discoverAgents(options: {
   }
 
   try {
-    const stdout = execSync(
-      `openclaw agents list --channel ${escapeShellArg(options.channel)} --chat-id ${escapeShellArg(options.chatId)} --json`,
-      { timeout: 10_000, stdio: ['pipe', 'pipe', 'pipe'] },
-    ).toString('utf-8');
+    const stdout = execFileSync(
+      'openclaw',
+      ['agents', 'list', '--channel', options.channel, '--chat-id', options.chatId, '--json'],
+      { timeout: 10_000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    );
 
     const parsed = JSON.parse(stdout);
     if (!Array.isArray(parsed)) return [];
@@ -67,10 +67,23 @@ export function discoverAgents(options: {
 }
 
 /**
+ * 默认的 agent → task type 映射。
+ * 当 CLI 不提供 taskTypes/skills 时，用此静态映射做兜底匹配。
+ */
+const DEFAULT_AGENT_TASK_MAP: Record<string, string[]> = {
+  'codex': ['research', 'code', 'test'],
+  'claude-code': ['analysis', 'code', 'document'],
+  'rd-review': ['review', 'verification'],
+};
+
+/**
  * 根据 task type 匹配最佳 Agent。
  *
- * 优先匹配 taskTypes 包含 task.type 的 Agent，
- * 其次匹配 skills 包含 task.type 的 Agent，
+ * 匹配优先级：
+ * 1. taskTypes 精确匹配（CLI 提供时）
+ * 2. skills 模糊匹配（CLI 提供时）
+ * 3. agentId 静态映射兜底（DEFAULT_AGENT_TASK_MAP）
+ * 
  * 无匹配则返回 null（由 orchestrator 自己执行）。
  */
 export function matchAgentForTask(
@@ -80,12 +93,19 @@ export function matchAgentForTask(
   if (agents.length === 0) return null;
 
   // 优先：taskTypes 精确匹配
-  const byTaskType = agents.find((a) => a.taskTypes.includes(task.type));
+  const byTaskType = agents.find((a) => a.taskTypes.length > 0 && a.taskTypes.includes(task.type));
   if (byTaskType) return byTaskType;
 
   // 其次：skills 模糊匹配
-  const bySkill = agents.find((a) => a.skills.includes(task.type));
+  const bySkill = agents.find((a) => a.skills.length > 0 && a.skills.includes(task.type));
   if (bySkill) return bySkill;
+
+  // 兜底：agentId 静态映射
+  const byStaticMap = agents.find((a) => {
+    const mappedTypes = DEFAULT_AGENT_TASK_MAP[a.agentId];
+    return mappedTypes !== undefined && mappedTypes.includes(task.type);
+  });
+  if (byStaticMap) return byStaticMap;
 
   return null;
 }

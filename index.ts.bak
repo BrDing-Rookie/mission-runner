@@ -2,7 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/core";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-runtime";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,32 +30,6 @@ function runScript(scriptName: string, args: string[]): { exitCode: number; outp
       output: (e.stdout || "") + (e.stderr || ""),
     };
   }
-}
-
-
-/**
- * Normalize a param value: accept both camelCase and snake_case.
- * Returns the first defined string value among the candidates.
- */
-function strParam(p: Record<string, unknown>, ...keys: string[]): string | undefined {
-  for (const k of keys) {
-    if (typeof p[k] === "string") return p[k] as string;
-  }
-  return undefined;
-}
-
-function numParam(p: Record<string, unknown>, ...keys: string[]): number | undefined {
-  for (const k of keys) {
-    if (typeof p[k] === "number") return p[k] as number;
-  }
-  return undefined;
-}
-
-function boolParam(p: Record<string, unknown>, ...keys: string[]): boolean | undefined {
-  for (const k of keys) {
-    if (typeof p[k] === "boolean") return p[k] as boolean;
-  }
-  return undefined;
 }
 
 function createMissionTool(opts: {
@@ -105,21 +79,11 @@ const missionStart = createMissionTool({
   label: "Mission Start",
   description: "Create and start a new mission (create → plan → dispatch). Provide a title and goal.",
   script: "mission-start.ts",
-  buildArgs: (p, dir) => {
-    const title = strParam(p, "title");
-    const goal = strParam(p, "goal");
-    const channel = strParam(p, "channel");
-    const chatId = strParam(p, "chat_id", "chatId", "chat-id");
-    const sessionKey = strParam(p, "session_key", "sessionKey");
-    return [
-      "--missions-dir", dir,
-      ...(title ? ["--title", title] : []),
-      ...(goal ? ["--goal", goal] : []),
-      ...(channel ? ["--channel", channel] : []),
-      ...(chatId ? ["--chat-id", chatId] : []),
-      ...(sessionKey ? ["--session-key", sessionKey] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.title === "string" ? ["--title", p.title] : []),
+    ...(typeof p.goal === "string" ? ["--goal", p.goal] : []),
+  ],
 });
 
 const missionOrchestrate = createMissionTool({
@@ -127,15 +91,11 @@ const missionOrchestrate = createMissionTool({
   label: "Mission Orchestrate",
   description: "Run the orchestration loop: watchdog evaluates → dispatch/run-action → repeat. Drives a mission forward up to max-steps.",
   script: "mission-orchestrate.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    const maxSteps = numParam(p, "max_steps", "maxSteps");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-      ...(maxSteps !== undefined ? ["--max-steps", String(maxSteps)] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+    ...(typeof p.max_steps === "number" ? ["--max-steps", String(p.max_steps)] : []),
+  ],
 });
 
 const missionVerify = createMissionTool({
@@ -143,13 +103,10 @@ const missionVerify = createMissionTool({
   label: "Mission Verify",
   description: "Verify whether a mission meets its completion criteria.",
   script: "mission-verify.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+  ],
 });
 
 const missionWatchdog = createMissionTool({
@@ -157,13 +114,10 @@ const missionWatchdog = createMissionTool({
   label: "Mission Watchdog",
   description: "Scan all missions and output recommended next actions. Use --dry-run to preview without changes.",
   script: "mission-watchdog.ts",
-  buildArgs: (p, dir) => {
-    const dryRun = boolParam(p, "dry_run", "dryRun");
-    return [
-      "--missions-dir", dir,
-      ...(dryRun === true ? ["--dry-run"] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(p.dry_run === true ? ["--dry-run"] : []),
+  ],
 });
 
 const missionRunAction = createMissionTool({
@@ -171,15 +125,11 @@ const missionRunAction = createMissionTool({
   label: "Mission Run Action",
   description: "Execute a specific watchdog-recommended action on a mission.",
   script: "mission-run-action.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    const action = strParam(p, "action");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-      ...(action ? ["--action", action] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+    ...(typeof p.action === "string" ? ["--action", p.action] : []),
+  ],
 });
 
 const missionDispatch = createMissionTool({
@@ -187,13 +137,10 @@ const missionDispatch = createMissionTool({
   label: "Mission Dispatch",
   description: "Dispatch READY tasks in a mission to execution. Uses three-level fallback strategy: L1 (mention in chat) → L2 (create session + mention) → L3 (spawn fallback). Returns dispatch summary with level breakdown.",
   script: "mission-dispatch.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+  ],
 });
 
 const taskUpdate = createMissionTool({
@@ -201,21 +148,14 @@ const taskUpdate = createMissionTool({
   label: "Task Update",
   description: "Update a task's status (e.g., mark COMPLETED with summary and artifact path).",
   script: "task-update.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    const taskId = strParam(p, "task_id", "taskId", "task-id");
-    const status = strParam(p, "status");
-    const summary = strParam(p, "summary");
-    const artifact = strParam(p, "artifact");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-      ...(taskId ? ["--task-id", taskId] : []),
-      ...(status ? ["--status", status] : []),
-      ...(summary ? ["--summary", summary] : []),
-      ...(artifact ? ["--artifact", artifact] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+    ...(typeof p.task_id === "string" ? ["--task-id", p.task_id] : []),
+    ...(typeof p.status === "string" ? ["--status", p.status] : []),
+    ...(typeof p.summary === "string" ? ["--summary", p.summary] : []),
+    ...(typeof p.artifact === "string" ? ["--artifact", p.artifact] : []),
+  ],
 });
 
 const taskAdd = createMissionTool({
@@ -223,21 +163,14 @@ const taskAdd = createMissionTool({
   label: "Task Add",
   description: "Dynamically add a new task to a running mission.",
   script: "task-add.ts",
-  buildArgs: (p, dir) => {
-    const missionId = strParam(p, "mission_id", "missionId", "mission-id");
-    const taskId = strParam(p, "task_id", "taskId", "task-id");
-    const title = strParam(p, "title");
-    const type = strParam(p, "type");
-    const dependsOn = strParam(p, "depends_on", "dependsOn");
-    return [
-      "--missions-dir", dir,
-      ...(missionId ? ["--mission-id", missionId] : []),
-      ...(taskId ? ["--task-id", taskId] : []),
-      ...(title ? ["--title", title] : []),
-      ...(type ? ["--type", type] : []),
-      ...(dependsOn ? ["--depends-on", dependsOn] : []),
-    ];
-  },
+  buildArgs: (p, dir) => [
+    "--missions-dir", dir,
+    ...(typeof p.mission_id === "string" ? ["--mission-id", p.mission_id] : []),
+    ...(typeof p.task_id === "string" ? ["--task-id", p.task_id] : []),
+    ...(typeof p.title === "string" ? ["--title", p.title] : []),
+    ...(typeof p.type === "string" ? ["--type", p.type] : []),
+    ...(typeof p.depends_on === "string" ? ["--depends-on", p.depends_on] : []),
+  ],
 });
 
 // --- Plugin Entry ---
@@ -247,24 +180,9 @@ export default definePluginEntry({
   name: "Mission Runner",
   description: "Autonomous mission orchestration for OpenClaw agents — plan, dispatch, verify, recover.",
   register(api) {
-    // Fix #3: Resolve missions-dir to Agent workspace, not plugin directory.
-    // Priority: pluginConfig.missionsDir > api.agentWorkspaceDir/missions > cwd/missions
-    const agentWorkspace = (api as Record<string, unknown>).agentWorkspaceDir as string | undefined;
-    const configuredDir = typeof api.pluginConfig?.missionsDir === "string" && api.pluginConfig.missionsDir.trim()
+    const defaultMissionsDir = typeof api.pluginConfig?.missionsDir === "string" && api.pluginConfig.missionsDir.trim()
       ? api.pluginConfig.missionsDir
-      : undefined;
-
-    let defaultMissionsDir: string;
-    if (configuredDir) {
-      // Explicit config — resolve relative to agent workspace if not absolute
-      defaultMissionsDir = resolve(agentWorkspace ?? process.cwd(), configuredDir);
-    } else if (agentWorkspace) {
-      // Use agent workspace
-      defaultMissionsDir = join(agentWorkspace, "missions");
-    } else {
-      // Fallback: cwd (which for Gateway is typically the agent workspace)
-      defaultMissionsDir = resolve(process.cwd(), "missions");
-    }
+      : "./missions";
 
     const withDefaultMissionsDir = (tool: AnyAgentTool): AnyAgentTool => ({
       ...tool,

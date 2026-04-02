@@ -74,12 +74,27 @@ function listArtifactFiles(missionsDir: string, missionId: string): string[] {
 function artifactFileExists(missionsDir: string, missionId: string, artifactPath: string): boolean {
   // Try absolute path first
   if (existsSync(artifactPath)) return true;
-  // Try relative to mission dir
-  const missionRelative = join(missionsDir, missionId, artifactPath);
+
+  // Strip "missions/{missionId}/" prefix if present (artifact paths are stored this way)
+  const missionPrefix = `missions/${missionId}/`;
+  const stripped = artifactPath.startsWith(missionPrefix)
+    ? artifactPath.slice(missionPrefix.length)
+    : artifactPath;
+
+  // Try relative to mission dir (e.g., "artifacts/CHANGELOG.md" under missions/{id}/)
+  const missionDir = join(missionsDir, missionId);
+  const missionRelative = join(missionDir, stripped);
   if (existsSync(missionRelative)) return true;
-  // Try relative to missions dir
+
+  // Try relative to missions dir (e.g., full "missions/{id}/artifacts/..." under missionsDir parent)
   const missionsRelative = join(missionsDir, artifactPath);
   if (existsSync(missionsRelative)) return true;
+
+  // Try resolving from missionsDir parent (workspace root)
+  const parentDir = join(missionsDir, '..');
+  const parentRelative = join(parentDir, artifactPath);
+  if (existsSync(parentRelative)) return true;
+
   return false;
 }
 

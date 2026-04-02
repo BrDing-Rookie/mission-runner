@@ -22,6 +22,47 @@ const DISCORD_IDS_PATH = join(HOME, 'openclaw-workspaces/teams/rd/lead/projects/
 /** 等待 Agent 在群内响应的超时（ms） */
 const MENTION_RESPONSE_TIMEOUT_MS = 15_000;
 
+/**
+ * 自动从 OpenClaw 配置中解析 Discord bot user IDs。
+ * Discord token 格式: base64(userId).timestamp.hmac
+ * 解析第一段即可得到 bot 的 user ID。
+ */
+function resolveDiscordUserIds(): Record<string, string> {
+  // 1. 优先尝试读取静态映射文件
+  try {
+    if (existsSync(DISCORD_IDS_PATH)) {
+      return JSON.parse(readFileSync(DISCORD_IDS_PATH, 'utf-8')) as Record<string, string>;
+    }
+  } catch { /* fall through */ }
+
+  // 2. 从 OpenClaw config 中解析
+  try {
+    const configPath = join(HOME, '.openclaw/openclaw.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const accounts = config?.channels?.discord?.accounts ?? {};
+    const result: Record<string, string> = {};
+
+    for (const [accName, acc] of Object.entries(accounts)) {
+      const token = (acc as Record<string, unknown>)?.token;
+      if (typeof token !== 'string' || !token) continue;
+      try {
+        const parts = token.split('.');
+        let b64 = parts[0];
+        const padding = 4 - (b64.length % 4);
+        if (padding !== 4) b64 += '='.repeat(padding);
+        const userId = Buffer.from(b64, 'base64').toString('utf-8');
+        if (/^\d+$/.test(userId)) {
+          result[accName] = userId;
+        }
+      } catch { /* skip this account */ }
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface AgentSessionInfo {
@@ -112,7 +153,8 @@ export function checkAgentSession(agentId: string): AgentSessionInfo[] {
     return sessions
       .filter((s: Record<string, unknown>) => {
         const status = String(s.status ?? '').toLowerCase();
-        return status === 'active' || status === 'idle' || status === 'running';
+        // If no status field, treat as active (CLI may not return status)
+        return !status || status === 'active' || status === 'idle' || status === 'running' || status === 'unknown';
       })
       .map((s: Record<string, unknown>): AgentSessionInfo => ({
         sessionKey: String(s.key ?? s.sessionKey ?? s.session_key ?? s.id ?? ''),
@@ -294,15 +336,27 @@ export function dispatchTaskToAgent(task: Task, mission: Mission, missionsDir: s
 
   const channelId = mission.owner?.chatId ?? '';
   const channelType = mission.owner?.channel ?? 'discord';
-    // Agent ID → Discord User ID 映射（从外部 JSON 文件加载）
-  let AGENT_DISCORD_IDS: Record<string, string> = {};
-  try {
-    const idsPath = DISCORD_IDS_PATH;
-    AGENT_DISCORD_IDS = JSON.parse(readFileSync(idsPath, 'utf-8')) as Record<string, string>;
-  } catch { /* fallback: no mapping */ }
-  const discordUserId = AGENT_DISCORD_IDS[agentId];
-  const agentMentionTag = (task.config?.agentMentionTag as string | undefined)
-    ?? (discordUserId ? `<@${discordUserId}>` : `@${agentId}`);
+    // Agent ID → Discord User ID 映射（自动从 OpenClaw config 解析）
+  const ACCOUNT_DISCORD_IDS = resolveDiscordUserIds();
+  // 尝试直接用 agentId 查找，如果没有则遍历 account 名称做模糊匹配
+  let discordUserId = ACCOUNT_DISCORD_IDS[agentId];
+  if (!discordUserId) {
+    // 改用静态映射作为兜底
+    const AGENT_ACCOUNT_MAP: Record<string, string> = {
+      'codex': 'discord-rd-arch',
+      'claude-code': 'discord-rd-dev-1',
+      'rd-review': 'discord-rd-reviewer',
+      'rd-coordinator': 'discord-rd-lead',
+      'rd-liaison': 'discord-rd-dev-2',
+    };
+    const accountName = AGENT_ACCOUNT_MAP[agentId];
+    if (accountName) {
+      discordUserId = ACCOUNT_DISCORD_IDS[accountName];
+    }
+  }
+  const configMentionTag = (task.config?.agentMentionTag as string | undefined) ?? '';
+  const agentMentionTag = configMentionTag.trim()
+    || (discordUserId ? `<@${discordUserId}>` : `@${agentId}`);
   const dispatchMessage = buildDispatchMessage(task, mission, missionsDir);
 
   // ── Level 1: 群聊 @ Agent ────────────────────────────────────────────────

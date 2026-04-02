@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { normalize, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { appendEvent, safeWriteFile, writeMission } from './lib/fs-utils.ts';
@@ -132,7 +132,14 @@ export function writeMissionArtifact(args: MissionWriteArtifactCliArgs, options?
   };
 
   if (!args.dryRun) {
-    const writeArtifactOk = safeWriteFile(absolutePath, content);
+    // 如果 content 为空且文件已存在，只注册 artifact 不覆盖
+    let writeArtifactOk: boolean;
+    if (content.trim().length === 0 && existsSync(absolutePath)) {
+      // 跳过写入，保留已有文件
+      writeArtifactOk = true;
+    } else {
+      writeArtifactOk = safeWriteFile(absolutePath, content);
+    }
     const writeMissionOk = writeMission(args.missionsDir, updatedMission);
     const eventOk = appendEvent(args.missionsDir, args.missionId, {
       type: 'mission_artifact_written',

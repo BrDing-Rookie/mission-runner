@@ -1,5 +1,4 @@
-import { execSync } from 'child_process';
-import { escapeShellArg } from './shell-utils.ts';
+import { execFileSync } from 'child_process';
 import type { Mission, MissionStatus } from './types.ts';
 
 export type MissionNotificationKind =
@@ -128,8 +127,9 @@ export class OpenClawMissionNotificationAdapter implements MissionNotificationAd
     const fullContent = payload.content + mentionSuffix;
 
     try {
-      execSync(
-        `openclaw message send --channel ${escapeShellArg(owner.channel)} --to ${escapeShellArg(owner.chatId)} --message ${escapeShellArg(fullContent)}`,
+      execFileSync(
+        'openclaw',
+        ['message', 'send', '--channel', owner.channel, '--to', owner.chatId, '--message', fullContent],
         { timeout: 10_000, stdio: 'pipe' }
       );
       return {

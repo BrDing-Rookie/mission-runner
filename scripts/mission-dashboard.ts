@@ -1,13 +1,12 @@
 #!/usr/bin/env tsx
 
 import { existsSync, readFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { listMissionIds, readMission, safeWriteFile } from './lib/fs-utils.ts';
 import { formatDashboard } from './lib/dashboard-formatter.ts';
 import { ACTIVE_STATUSES, type Mission } from './lib/types.ts';
-import { escapeShellArg } from './lib/shell-utils.ts';
 
 interface DashboardState {
   messageId: string;
@@ -123,45 +122,35 @@ function extractMessageId(output: string): string | null {
   return null;
 }
 
-function runCommand(command: string, verbose: boolean): string {
-  log(verbose, `exec ${command}`);
-  return execSync(command, {
+function runCommand(argv: string[], verbose: boolean): string {
+  log(verbose, `exec ${argv.join(' ')}`);
+  return execFileSync(argv[0], argv.slice(1), {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
 function editDashboardMessage(messageId: string, content: string, verbose: boolean): void {
-  const command = [
-    'openclaw message edit',
-    '--channel discord',
-    `--message-id ${escapeShellArg(messageId)}`,
-    `--message ${escapeShellArg(content)}`,
-  ].join(' ');
-
-  runCommand(command, verbose);
+  runCommand(
+    ['openclaw', 'message', 'edit', '--channel', 'discord', '--message-id', messageId, '--message', content],
+    verbose,
+  );
 }
 
 function sendDashboardMessage(channelId: string, content: string, verbose: boolean): string {
-  const sendCommand = [
-    'openclaw message send',
-    '--channel discord',
-    `--channel-id ${escapeShellArg(channelId)}`,
-    `--message ${escapeShellArg(content)}`,
-  ].join(' ');
-
-  const output = runCommand(sendCommand, verbose);
+  const output = runCommand(
+    ['openclaw', 'message', 'send', '--channel', 'discord', '--channel-id', channelId, '--message', content],
+    verbose,
+  );
   const messageId = extractMessageId(output);
   if (!messageId) {
     throw new Error(`Unable to extract message ID from openclaw output: ${output.trim() || '(empty output)'}`);
   }
 
-  const pinCommand = [
-    'openclaw message pin',
-    '--channel discord',
-    `--message-id ${escapeShellArg(messageId)}`,
-  ].join(' ');
-  runCommand(pinCommand, verbose);
+  runCommand(
+    ['openclaw', 'message', 'pin', '--channel', 'discord', '--message-id', messageId],
+    verbose,
+  );
   return messageId;
 }
 
