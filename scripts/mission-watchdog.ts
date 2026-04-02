@@ -10,6 +10,7 @@ import {
   shouldAutoVerify,
   type ExtendedWatchdogConfig,
 } from './lib/mission-watchdog-evaluator.ts';
+import { collectResults } from './lib/mission-actions.ts';
 import { runVerify } from './mission-verify.ts';
 
 // ── CLI Args ───────────────────────────────────────────────────────────────────
@@ -128,13 +129,32 @@ function main(): number {
         );
       }
 
-      const autoResult = tryAutoVerify(config, updatedMission);
+      // Auto-collect: when watchdog recommends COLLECT_RESULTS, execute it inline
+      if (result.action === 'COLLECT_RESULTS' && result.relatedTaskIds && result.relatedTaskIds.length > 0) {
+        console.log(`[mission-watchdog] auto-collect triggered | missionId=${mission.missionId} | tasks=${result.relatedTaskIds.join(',')}`);
+        try {
+          const collectResult = collectResults(config.missionsDir, mission.missionId, result.relatedTaskIds, config.dryRun);
+          console.log(`[mission-watchdog] auto-collect done | missionId=${mission.missionId} | collected=${collectResult.collectedTaskIds.join(',') || 'none'} | noResult=${collectResult.noResultTaskIds.join(',') || 'none'}`);
+        } catch (err) {
+          console.error(`[mission-watchdog] auto-collect failed | missionId=${mission.missionId} | error=${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      // Re-read mission after potential auto-collect changes
+      const postCollectMission = readMission(config.missionsDir, mission.missionId) ?? updatedMission;
+
+      const autoResult = tryAutoVerify(config, postCollectMission);
       if (autoResult.verified && autoResult.result) {
         console.log(
           `[mission-watchdog] auto-verify done | missionId=${autoResult.result.missionId} | verification=${autoResult.result.verificationStatus} | status=${autoResult.result.missionStatus} | changed=${autoResult.result.changed}`
         );
       }
     } else {
+      // Dry-run: log what would happen
+      if (result.action === 'COLLECT_RESULTS' && result.relatedTaskIds && result.relatedTaskIds.length > 0) {
+        console.log(`[mission-watchdog] auto-collect would trigger (dry-run) | missionId=${mission.missionId} | tasks=${result.relatedTaskIds.join(',')}`);
+      }
+
       const autoResult = tryAutoVerify(config, mission);
       if (autoResult.verified) {
         console.log(`[mission-watchdog] auto-verify would trigger (dry-run) | missionId=${mission.missionId}`);

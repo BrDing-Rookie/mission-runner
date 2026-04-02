@@ -75,10 +75,23 @@ export function buildDispatchMessage(task: Task, mission: Mission, missionsDir: 
     `--summary "你的完成摘要"`,
   ].join(' \\\n  ');
 
-  return [
+  const lines = [
     `📤 新任务派发 [${task.taskId}]「${task.title}」`,
     `类型: ${task.type} | Mission: ${mission.missionId}${desc}`,
     `[SubAgent-${agentId}] 请开始执行。`,
+  ];
+
+  // File boundary — restrict agent modifications to specific paths
+  const fileBoundary = task.fileBoundary ?? (task.config?.fileBoundary as string[] | undefined);
+  if (fileBoundary && fileBoundary.length > 0) {
+    lines.push('');
+    lines.push('⚠️ **文件修改范围**（只允许修改以下文件/目录）：');
+    for (const path of fileBoundary) {
+      lines.push(`- \`${path}\``);
+    }
+  }
+
+  lines.push(
     '',
     '⚠️ **完成后请执行以下命令汇报结果**（将 summary 替换为实际摘要）：',
     '```bash',
@@ -86,5 +99,7 @@ export function buildDispatchMessage(task: Task, mission: Mission, missionsDir: 
     '```',
     '',
     '如果任务失败，将 `--status COMPLETED` 改为 `--status FAILED`，并在 `--summary` 中说明原因。',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
 }

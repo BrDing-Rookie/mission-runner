@@ -4,7 +4,7 @@ import { pathToFileURL } from 'url';
 import { parseMissionCliArgs, persistMissionUpdate, requireMission, type MissionCliArgs } from './lib/mission-helpers.ts';
 import {
   computeVerification,
-  type CriterionResult,
+  type VerifyInput,
   type VerifyResult,
 } from './lib/mission-verifier.ts';
 
@@ -12,20 +12,34 @@ import {
 export type { VerifyResult } from './lib/mission-verifier.ts';
 export { extractPlanCriteria, listArtifactFiles } from './lib/mission-verifier.ts';
 
-export function runVerify(args: MissionCliArgs): VerifyResult {
+interface VerifyCliArgs extends MissionCliArgs {
+  autoOnly: boolean;
+}
+
+function parseVerifyCliArgs(argv: string[]): VerifyCliArgs {
+  const base = parseMissionCliArgs(argv);
+  let autoOnly = false;
+  for (const arg of argv) {
+    if (arg === '--auto-only') autoOnly = true;
+  }
+  return { ...base, autoOnly };
+}
+
+export function runVerify(args: VerifyInput): VerifyResult {
   const mission = requireMission(args);
   const computed = computeVerification(args, mission);
 
-  if (args.dryRun) {
+  if (args.dryRun || args.autoOnly) {
     return {
       missionId: mission.missionId,
       verificationStatus: computed.verificationStatus,
       missionStatus: computed.missionStatus,
       gaps: computed.gaps,
       criteriaResults: computed.criteriaResults,
+      structuralChecks: computed.structuralChecks,
       success: true,
       changed: false,
-      dryRun: true,
+      dryRun: args.dryRun ?? false,
     };
   }
 
@@ -47,6 +61,7 @@ export function runVerify(args: MissionCliArgs): VerifyResult {
     missionStatus: computed.missionStatus,
     gaps: computed.gaps,
     criteriaResults: computed.criteriaResults,
+    structuralChecks: computed.structuralChecks,
     success: true,
     changed: true,
     dryRun: false,
@@ -55,10 +70,27 @@ export function runVerify(args: MissionCliArgs): VerifyResult {
 
 function main(): number {
   try {
-    const args = parseMissionCliArgs(process.argv.slice(2));
+    const args = parseVerifyCliArgs(process.argv.slice(2));
     const result = runVerify(args);
+
+    if (args.autoOnly) {
+      // Auto-only mode: just output structural check results
+      console.log(`[mission-verify] auto-only | missionId=${result.missionId}`);
+      const checks = result.structuralChecks ?? [];
+      const autoChecks = checks.filter((c) => c.type === 'AUTO');
+      const passed = autoChecks.filter((c) => c.passed === true).length;
+      const failed = autoChecks.filter((c) => c.passed === false).length;
+      const skipped = autoChecks.filter((c) => c.passed === null).length;
+      console.log(`  auto checks: ${passed} passed, ${failed} failed, ${skipped} inconclusive`);
+      for (const check of checks) {
+        const icon = check.passed === true ? '✅' : check.passed === false ? '❌' : '⏸️';
+        console.log(`  ${icon} [${check.type}] ${check.criterion}`);
+      }
+      return failed > 0 ? 1 : 0;
+    }
+
     if (args.dryRun) {
-      console.log(JSON.stringify({ missionId: result.missionId, verificationStatus: result.verificationStatus, missionStatus: result.missionStatus, gaps: result.gaps, criteriaResults: result.criteriaResults }, null, 2));
+      console.log(JSON.stringify({ missionId: result.missionId, verificationStatus: result.verificationStatus, missionStatus: result.missionStatus, gaps: result.gaps, criteriaResults: result.criteriaResults, structuralChecks: result.structuralChecks }, null, 2));
     } else {
       console.log(`[mission-verify] verified | missionId=${result.missionId} | verification=${result.verificationStatus} | status=${result.missionStatus} | criteria=${result.criteriaResults.filter((r) => r.passed).length}/${result.criteriaResults.length}`);
     }

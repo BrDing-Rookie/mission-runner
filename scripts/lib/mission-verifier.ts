@@ -3,9 +3,11 @@
  *
  * Extracted from mission-verify.ts: plan criteria extraction, artifact
  * file listing, criterion evaluation, and verification result computation.
+ * Includes structuralVerify for automated checks (tests, artifacts, file existence).
  */
 
-import { existsSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CompletionCriterion, Mission, MissionStatus, VerificationStatus } from './types.ts';
 import { loadTextIfExists, missionPath, setMissionStatus, setVerification, upsertArtifact } from './mission-helpers.ts';
@@ -24,6 +26,7 @@ export interface VerifyResult {
   missionStatus: MissionStatus;
   gaps: string[];
   criteriaResults: CriterionResult[];
+  structuralChecks?: StructuralCheck[];
   success: boolean;
   changed: boolean;
   dryRun: boolean;
@@ -170,8 +173,9 @@ export function buildVerificationMarkdown(
   maxIterations: number,
   completedTasks: number,
   totalTasks: number,
+  structuralChecks?: StructuralCheck[],
 ): string {
-  return [
+  const lines = [
     `# Verification for ${mission.missionId}`,
     '',
     `- status: ${verificationStatus}`,
@@ -191,9 +195,23 @@ export function buildVerificationMarkdown(
           const criterion = completionCriteria.find((item) => item.id === result.criterionId);
           const required = criterion?.required === false ? 'optional' : 'required';
           const state = result.passed ? 'PASS' : 'GAP';
-          return `- [${state}] ${result.criterionId} (${required}): ${criterion?.description ?? 'Unknown criterion'} — ${result.reason}`;
+          const autoTag = criterion ? `[${classifyCriterion(criterion.description)}]` : '[MANUAL]';
+          return `- [${state}] ${autoTag} ${result.criterionId} (${required}): ${criterion?.description ?? 'Unknown criterion'} — ${result.reason}`;
         })),
     '',
+  ];
+
+  // Structural verification section
+  if (structuralChecks && structuralChecks.length > 0) {
+    lines.push('## Structural Verification');
+    for (const check of structuralChecks) {
+      const icon = check.passed === true ? '✅' : check.passed === false ? '❌' : '⏸️';
+      lines.push(`- ${icon} [${check.type}] ${check.criterion} — ${check.reason}`);
+    }
+    lines.push('');
+  }
+
+  lines.push(
     '## Plan-Defined Criteria',
     ...(planCriteria.length === 0
       ? ['- none found in plan.md']
@@ -207,7 +225,152 @@ export function buildVerificationMarkdown(
     '## Gaps',
     ...(gaps.length === 0 ? ['- none'] : gaps.map((gap) => `- ${gap}`)),
     '',
-  ].join('\n');
+  );
+
+  return lines.join('\n');
+}
+
+// ── Structural (Automated) Verification ────────────────────────────────────────
+
+/** Keywords that indicate a criterion can be auto-verified */
+const AUTO_VERIFY_KEYWORDS = [
+  '测试通过', '测试全通过', 'tests pass', 'test pass', 'npm test',
+  '文件存在', 'file exist', 'files exist',
+  '目录', 'directory', 'folder',
+  '已删除', 'deleted', 'removed',
+  '不超过', '≤', '<=', 'at most', 'no more than',
+];
+
+export interface StructuralCheck {
+  criterion: string;
+  type: 'AUTO' | 'MANUAL';
+  passed: boolean | null;  // null = not checked (MANUAL)
+  reason: string;
+}
+
+/**
+ * Classify a completion criterion as AUTO or MANUAL based on keyword matching.
+ */
+export function classifyCriterion(description: string): 'AUTO' | 'MANUAL' {
+  const lower = description.toLowerCase();
+  return AUTO_VERIFY_KEYWORDS.some((kw) => lower.includes(kw)) ? 'AUTO' : 'MANUAL';
+}
+
+/**
+ * Run structural (automated) verification checks.
+ *
+ * 1. If mission dir has `test-command.txt`, read and execute it → check exit code
+ * 2. If tasks have artifacts, check files exist on disk
+ * 3. For completion criteria with auto-verifiable keywords, attempt verification
+ */
+export function structuralVerify(missionsDir: string, mission: Mission): StructuralCheck[] {
+  const results: StructuralCheck[] = [];
+  const missionDir = join(missionsDir, mission.missionId);
+
+  // ── 1. Test command ──────────────────────────────────────────────────────
+  const testCommandFile = join(missionDir, 'test-command.txt');
+  if (existsSync(testCommandFile)) {
+    const testCommand = readFileSync(testCommandFile, 'utf-8').trim();
+    if (testCommand) {
+      let passed = false;
+      let reason = '';
+      try {
+        execFileSync('bash', ['-c', testCommand], {
+          timeout: 120_000,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: join(missionsDir, '..'),  // project root
+        });
+        passed = true;
+        reason = `Test command succeeded: \`${testCommand}\``;
+      } catch (err) {
+        const e = err as { status?: number; stderr?: string };
+        reason = `Test command failed (exit ${e.status ?? 'unknown'}): \`${testCommand}\``;
+      }
+      results.push({ criterion: `Test: ${testCommand}`, type: 'AUTO', passed, reason });
+    }
+  }
+
+  // ── 2. Task artifact existence ───────────────────────────────────────────
+  const tasks = mission.tasks ?? [];
+  for (const task of tasks) {
+    const taskArtifacts = task.artifacts ?? [];
+    for (const artifact of taskArtifacts) {
+      const artPath = artifact.path;
+      const exists = existsSync(artPath)
+        || existsSync(join(missionDir, artPath))
+        || existsSync(join(missionsDir, '..', artPath));
+      results.push({
+        criterion: `Artifact exists: ${artPath} (task ${task.taskId})`,
+        type: 'AUTO',
+        passed: exists,
+        reason: exists ? `File found: ${artPath}` : `File NOT found: ${artPath}`,
+      });
+    }
+  }
+
+  // ── 3. Auto-verifiable completion criteria ───────────────────────────────
+  const completionCriteria = mission.completionCriteria ?? [];
+  for (const criterion of completionCriteria) {
+    const kind = classifyCriterion(criterion.description);
+    if (kind === 'MANUAL') {
+      results.push({
+        criterion: criterion.description,
+        type: 'MANUAL',
+        passed: criterion.verified === true ? true : null,
+        reason: criterion.verified === true ? 'Manually marked verified' : 'Requires manual verification',
+      });
+    } else {
+      // Auto criterion — attempt basic checks
+      const lower = criterion.description.toLowerCase();
+      let passed: boolean | null = null;
+      let reason = 'Auto-check inconclusive';
+
+      if (lower.includes('测试通过') || lower.includes('tests pass') || lower.includes('test pass') || lower.includes('npm test')) {
+        // Try running npm test if test-command.txt wasn't present
+        if (!existsSync(testCommandFile)) {
+          try {
+            execFileSync('npm', ['test'], {
+              timeout: 120_000,
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+              cwd: join(missionsDir, '..'),
+            });
+            passed = true;
+            reason = 'npm test passed';
+          } catch (err) {
+            const e = err as { status?: number };
+            passed = false;
+            reason = `npm test failed (exit ${e.status ?? 'unknown'})`;
+          }
+        } else {
+          // Already checked via test-command.txt
+          const testResult = results.find((r) => r.criterion.startsWith('Test:'));
+          if (testResult) {
+            passed = testResult.passed;
+            reason = `Covered by test-command.txt: ${testResult.reason}`;
+          }
+        }
+      } else if (lower.includes('已删除') || lower.includes('deleted') || lower.includes('removed')) {
+        // Can't auto-verify deletion without knowing what was deleted
+        passed = null;
+        reason = 'Deletion check requires specific path — mark manually';
+      } else if (lower.includes('文件存在') || lower.includes('file exist')) {
+        // Already covered by artifact checks above
+        passed = null;
+        reason = 'File existence checked via artifact listing';
+      }
+
+      results.push({
+        criterion: criterion.description,
+        type: 'AUTO',
+        passed,
+        reason,
+      });
+    }
+  }
+
+  return results;
 }
 
 // ── Core Verify Logic ──────────────────────────────────────────────────────────
@@ -216,6 +379,8 @@ export interface VerifyInput {
   missionsDir: string;
   missionId: string;
   dryRun: boolean;
+  /** Only run automated structural checks, skip full verification */
+  autoOnly?: boolean;
 }
 
 export interface VerifyComputed {
@@ -224,6 +389,7 @@ export interface VerifyComputed {
   missionStatus: MissionStatus;
   gaps: string[];
   criteriaResults: CriterionResult[];
+  structuralChecks: StructuralCheck[];
   verificationMarkdown: string;
   verificationFile: string;
   updatedMission: Mission;
@@ -293,6 +459,9 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
       ? `Verification failed permanently: iteration limit ${maxIterations} reached with ${gaps.length} unresolved gap(s).`
       : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria.`;
 
+  // ── Structural verification ───────────────────────────────────────────────
+  const structuralChecks = structuralVerify(args.missionsDir, mission);
+
   const now = new Date().toISOString();
   const verificationFile = missionPath(args.missionsDir, mission.missionId, 'verification.md');
 
@@ -300,7 +469,23 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
     mission, verificationStatus, verificationSummary,
     criterionResults, completionCriteria, planCriteria, artifactFiles, gaps,
     currentIteration, maxIterations, completedTasks, tasks.length,
+    structuralChecks,
   );
+
+  // In auto-only mode, don't change mission status
+  if (args.autoOnly) {
+    return {
+      mission,
+      verificationStatus,
+      missionStatus: mission.status,
+      gaps,
+      criteriaResults: criterionResults,
+      structuralChecks,
+      verificationMarkdown,
+      verificationFile,
+      updatedMission: mission,
+    };
+  }
 
   const newMissionStatus: MissionStatus = verificationStatus === 'PASS'
     ? 'COMPLETED'
@@ -322,6 +507,7 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
     missionStatus: newMissionStatus,
     gaps,
     criteriaResults: criterionResults,
+    structuralChecks,
     verificationMarkdown,
     verificationFile,
     updatedMission,

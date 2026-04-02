@@ -171,27 +171,26 @@ export function evaluateMission(mission: Mission, config: WatchdogConfig, nowMs:
         { tasks: summarizeTasks(tasks), idleMs });
     }
 
-    // ── Task-level stall detection ──────────────────────────────────────────
-    // Even when the mission overall idle budget hasn't expired, check for
-    // individual RUNNING/WAITING_BACKGROUND tasks stalled over 30 minutes.
-    // This catches cases where dispatch sent a task to an agent but the agent
-    // never called task-update to report back.
+    // ── Task-level stall detection → auto result collection ────────────────
+    // When individual RUNNING/WAITING_BACKGROUND tasks have been stalled over
+    // taskStallThresholdMs, emit COLLECT_RESULTS so the handler can check git
+    // commits and auto-complete tasks whose agents forgot to call task-update.
     const taskStallThresholdMs = config.taskStallThresholdMs ?? TASK_STALL_THRESHOLD_MS;
     if (runningTasks.length > 0) {
       const stalledTasks = runningTasks.filter((task) => {
         const taskStartMs = safeDateMs(task.startedAt);
-        // Only check tasks that have an explicit startedAt timestamp
         if (taskStartMs === null) return false;
         return (nowMs - taskStartMs) >= taskStallThresholdMs;
       });
       if (stalledTasks.length > 0) {
         const stalledIds = stalledTasks.map((t) => t.taskId);
+        const stalledAgents = stalledTasks.map((t) => t.agent ?? t.config?.agentId ?? 'unknown');
         const stallMinutes = Math.round(taskStallThresholdMs / 60_000);
-        return buildResult(mission, 'ESCALATE_STUCK',
-          `${stalledTasks.length} task(s) stalled for over ${stallMinutes} minutes with no progress: ${stalledIds.join(', ')}. Orchestrator should manually check and run task-update if agent has completed.`,
+        return buildResult(mission, 'COLLECT_RESULTS',
+          `${stalledTasks.length} task(s) stalled for over ${stallMinutes} minutes: ${stalledIds.join(', ')}. Attempting automatic result collection via git log.`,
           isoAt(nowMs + config.backgroundCheckIntervalMs),
           stalledIds,
-          { tasks: summarizeTasks(tasks), stalledTaskIds: stalledIds, stallMinutes, idleMs });
+          { tasks: summarizeTasks(tasks), stalledTaskIds: stalledIds, stalledAgents, stallMinutes, idleMs });
       }
     }
 

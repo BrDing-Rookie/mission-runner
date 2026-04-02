@@ -3,16 +3,33 @@
 import { pathToFileURL } from 'url';
 import { appendEvent } from './lib/fs-utils.ts';
 import { parseMissionActionCliArgs } from './lib/mission-helpers.ts';
-import { retryFailedTasks, setEscalationState, markNotificationFlag } from './lib/mission-actions.ts';
+import { retryFailedTasks, setEscalationState, markNotificationFlag, collectResults } from './lib/mission-actions.ts';
 import { reconcileBackgroundMission } from './mission-reconcile-background.ts';
 import { runVerify } from './mission-verify.ts';
 import { main as resumeMain } from './mission-resume.ts';
 import type { MissionAction } from './lib/types.ts';
 
-const SUPPORTED_ACTIONS: MissionAction[] = ['CHECK_BACKGROUND', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'];
+const SUPPORTED_ACTIONS: MissionAction[] = ['CHECK_BACKGROUND', 'COLLECT_RESULTS', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'];
 
 function isResumeSummaryChanged(summary: string): boolean {
   return /\| resumed=(?!none)|\| unlocked=(?!none)/.test(summary);
+}
+
+/**
+ * Parse --task-ids from argv. Accepts comma-separated or multiple --task-id flags.
+ * Falls back to reading stalledTaskIds from the mission's running tasks.
+ */
+function parseTaskIdsList(argv: string[]): string[] {
+  const ids: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const next = argv[i + 1];
+    if ((arg === '--task-ids' || arg === '--task-id') && next) {
+      ids.push(...next.split(',').map((s) => s.trim()).filter(Boolean));
+      i += 1;
+    }
+  }
+  return ids;
 }
 
 export function main(argv: string[] = process.argv.slice(2)): number {
@@ -48,6 +65,24 @@ export function main(argv: string[] = process.argv.slice(2)): number {
         progressed: result.progressed, dryRun: args.dryRun, reconciledTaskIds: result.reconciledTaskIds,
         completedTaskIds: result.completedTaskIds, failedTaskIds: result.failedTaskIds,
       }, null, 2));
+      return result.success ? 0 : 1;
+    }
+
+    // ── COLLECT_RESULTS ─────────────────────────────────────────────────────
+    if (args.action === 'COLLECT_RESULTS') {
+      // Extract stalledTaskIds from watchdog context or use relatedTaskIds from CLI
+      // The watchdog passes these as --task-ids or we parse from the mission
+      const stalledTaskIds = parseTaskIdsList(argv);
+      const result = collectResults(args.missionsDir, args.missionId, stalledTaskIds, args.dryRun);
+      if (!args.dryRun && result.changed) {
+        const eventOk = appendEvent(args.missionsDir, result.missionId, {
+          type: 'mission_action_executed', action: args.action, missionStatus: result.missionStatus,
+          collectedTaskIds: result.collectedTaskIds, noResultTaskIds: result.noResultTaskIds,
+          success: result.success, changed: result.changed, dryRun: args.dryRun,
+        });
+        if (!eventOk) { console.error(`[mission-run-action] failed | missionId=${result.missionId} | action=${args.action} | event=false`); return 1; }
+      }
+      console.log(JSON.stringify(result, null, 2));
       return result.success ? 0 : 1;
     }
 

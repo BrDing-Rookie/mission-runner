@@ -131,6 +131,8 @@ export interface Task {
   backgroundProcessId?: string | null;
   /** 展示层分组标签（如 research / design / implement / test / review），仅用于 dashboard 聚合，不影响执行逻辑 */
   phase?: string;
+  /** 该 task 允许修改的文件/目录范围。dispatch 时写入消息，帮助并行任务避免冲突 */
+  fileBoundary?: string[];
   config?: Record<string, unknown>;
 }
 
@@ -225,6 +227,7 @@ export interface Mission {
 export type MissionAction =
   | 'NONE'
   | 'CHECK_BACKGROUND'
+  | 'COLLECT_RESULTS'
   | 'RESUME_TASK'
   | 'TRIGGER_VERIFY'
   | 'RETRY_TASK'
