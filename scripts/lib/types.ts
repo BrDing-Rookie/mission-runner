@@ -257,6 +257,8 @@ export interface WatchdogConfig {
   backgroundCheckIntervalMs: number;
   /** 最大允许的空转时间（毫秒），默认 10 分钟 */
   maxIdleTimeMs: number;
+  /** 单个 task 停滞超时（毫秒），默认 30 分钟。RUNNING/WAITING_BACKGROUND 的 task 超过此时间无进展则告警 */
+  taskStallThresholdMs?: number;
   /** 是否 dry-run 模式 */
   dryRun: boolean;
   /** 详细日志 */

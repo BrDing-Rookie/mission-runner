@@ -16,6 +16,9 @@ import {
   type WatchdogConfig,
 } from './types.ts';
 
+/** Default task stall threshold: 30 minutes */
+const TASK_STALL_THRESHOLD_MS = 30 * 60 * 1000;
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 export function safeDateMs(value?: string | null): number | null {
@@ -153,6 +156,7 @@ export function evaluateMission(mission: Mission, config: WatchdogConfig, nowMs:
         isoAt(nowMs + config.backgroundCheckIntervalMs),
         tasks.map((task) => task.taskId), { tasks: summarizeTasks(tasks) });
     }
+
     if (idleMs >= config.maxIdleTimeMs) {
       if (retryableTasks.length > 0) {
         return buildResult(mission, 'RETRY_TASK',
@@ -166,6 +170,31 @@ export function evaluateMission(mission: Mission, config: WatchdogConfig, nowMs:
         undefined, runningTasks.map((task) => task.taskId),
         { tasks: summarizeTasks(tasks), idleMs });
     }
+
+    // ── Task-level stall detection ──────────────────────────────────────────
+    // Even when the mission overall idle budget hasn't expired, check for
+    // individual RUNNING/WAITING_BACKGROUND tasks stalled over 30 minutes.
+    // This catches cases where dispatch sent a task to an agent but the agent
+    // never called task-update to report back.
+    const taskStallThresholdMs = config.taskStallThresholdMs ?? TASK_STALL_THRESHOLD_MS;
+    if (runningTasks.length > 0) {
+      const stalledTasks = runningTasks.filter((task) => {
+        const taskStartMs = safeDateMs(task.startedAt);
+        // Only check tasks that have an explicit startedAt timestamp
+        if (taskStartMs === null) return false;
+        return (nowMs - taskStartMs) >= taskStallThresholdMs;
+      });
+      if (stalledTasks.length > 0) {
+        const stalledIds = stalledTasks.map((t) => t.taskId);
+        const stallMinutes = Math.round(taskStallThresholdMs / 60_000);
+        return buildResult(mission, 'ESCALATE_STUCK',
+          `${stalledTasks.length} task(s) stalled for over ${stallMinutes} minutes with no progress: ${stalledIds.join(', ')}. Orchestrator should manually check and run task-update if agent has completed.`,
+          isoAt(nowMs + config.backgroundCheckIntervalMs),
+          stalledIds,
+          { tasks: summarizeTasks(tasks), stalledTaskIds: stalledIds, stallMinutes, idleMs });
+      }
+    }
+
     return buildResult(mission, 'NONE',
       'Mission is still running within idle budget.',
       nextWakeAtMs !== null ? mission.nextWakeAt ?? undefined : isoAt(nowMs + config.backgroundCheckIntervalMs),

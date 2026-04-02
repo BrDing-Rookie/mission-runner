@@ -7,10 +7,10 @@
 
 ## P0 — 必须修复
 
-- [ ] **F1: dispatch-agent.ts execSync → 安全替换**
-  - [ ] `execSync(\`sleep ...\`)` → `setTimeout` 或 `Atomics.wait` (`scripts/lib/mission-dispatch-agent.ts:57`)
-  - [ ] `execSync(command)` → `execFileSync('openclaw', [...args])` (`scripts/lib/mission-dispatch-agent.ts:65`)
-  - [ ] `execSync(\`mkdir -p ...\`)` → `mkdirSync(dir, {recursive: true})` (`scripts/lib/mission-dispatch-agent.ts:246`)
+- [x] **F1: dispatch-agent.ts execSync → 安全替换** ✅ (commit `de2f4e3`, 2026-04-02)
+  - [x] `execSync(\`sleep ...\`)` → `setTimeout` 或 `Atomics.wait`
+  - [x] `execSync(command)` → `execFileSync('openclaw', [...args])`
+  - [x] `execSync(\`mkdir -p ...\`)` → `mkdirSync(dir, {recursive: true})`
 
 ## P1 — 应该修复
 
@@ -32,9 +32,8 @@
   - `mission-dispatch.ts` 的 `buildDispatchSummary()` 与 `mission-dispatch-agent.ts` 的 `DispatchSummary` 定义重复
   - 确认两边接口一致或合并 (`scripts/mission-dispatch.ts:108-127`)
 
-- [ ] **F6: 状态机补充 PLANNED→WAITING_BACKGROUND**
-  - `types.ts` 中 `PLANNED` 的合法转换缺少 `WAITING_BACKGROUND`
-  - 当前不影响（tasks 从 READY 出发），但应预防性补充 (`scripts/lib/types.ts:287`)
+- [x] **F6: 状态机补充 PLANNED→WAITING_BACKGROUND** ✅ (commit `de2f4e3`, 2026-04-02)
+  - `types.ts` 中 `PLANNED` 的合法转换已包含 `WAITING_BACKGROUND`
 
 - [ ] **F7: dispatch 失败添加重试冷却**
   - dispatch-agent 全级别失败时 task 保留 READY 状态，无重试计数/冷却
