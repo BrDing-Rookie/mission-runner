@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { evaluateMission } from './mission-watchdog.ts';
 import { runVerify, extractPlanCriteria, listArtifactFiles } from './mission-verify.ts';
 import { DEFAULT_WATCHDOG_CONFIG, type Mission } from './lib/types.ts';
-import { readMissionFile, readEvents, writeMissionFixture } from './test-helpers.ts';
+import { readMissionFile, writeMissionFixture } from './test-helpers.ts';
 
 const BASE_TS = '2026-03-28T00:00:00.000Z';
 

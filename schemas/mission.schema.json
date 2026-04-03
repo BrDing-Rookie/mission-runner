@@ -59,6 +59,10 @@
         "requestMessageId": {
           "type": "string",
           "description": "请求消息ID"
+        },
+        "userMentionTag": {
+          "type": "string",
+          "description": "用户在渠道内的 @mention 标记（如 <@123456>）"
         }
       }
     },
@@ -252,6 +256,19 @@
         },
         "summary": {
           "type": ["string", "null"]
+        },
+        "criteriaResults": {
+          "type": "array",
+          "description": "各完成标准的验证结果",
+          "items": {
+            "type": "object",
+            "required": ["criterionId", "passed"],
+            "properties": {
+              "criterionId": { "type": "string" },
+              "passed": { "type": "boolean" },
+              "reason": { "type": ["string", "null"] }
+            }
+          }
         }
       }
     },
@@ -292,6 +309,11 @@
           "type": "boolean",
           "description": "用户是否补充了信息",
           "default": false
+        },
+        "notifiedTransitions": {
+          "type": "object",
+          "description": "幂等去重：key 如 'PLANNED->RUNNING' 或 'task:T1:READY->RUNNING'",
+          "additionalProperties": { "type": "boolean" }
         }
       }
     },

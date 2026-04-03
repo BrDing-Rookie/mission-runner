@@ -130,6 +130,11 @@
       "type": "string",
       "description": "展示层分组标签，用于 dashboard 按阶段聚合展示。不影响执行逻辑。"
     },
+    "fileBoundary": {
+      "type": "array",
+      "description": "该 task 允许修改的文件/目录范围。dispatch 时写入消息，帮助并行任务避免冲突。",
+      "items": { "type": "string" }
+    },
     "config": {
       "type": "object",
       "description": "任务特定配置",

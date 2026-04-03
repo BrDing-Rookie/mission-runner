@@ -23,12 +23,23 @@ scripts/
 │   ├── fs-utils.ts            # 文件系统工具 — mission.json 读写、events.jsonl
 │   ├── mission-helpers.ts     # Mission 辅助函数
 │   ├── mission-commit.ts      # 状态提交 + 通知触发
+│   ├── mission-dispatcher.ts  # 任务派发辅助 — 就绪检查、结果应用、摘要构建
 │   ├── mission-dispatch-agent.ts # Agent 派发 L1/L2/L3
-│   ├── mission-notification.ts     # 通知系统核心
+│   ├── dispatch-queue.ts      # L3 回退：写 dispatch queue 文件到磁盘
+│   ├── dispatch-messenger.ts  # 通过 @mention 向 Agent 发送派发消息
+│   ├── agent-session.ts       # Agent session 检查与创建（OpenClaw CLI）
+│   ├── safe-exec.ts           # 安全 CLI 命令执行封装（防注入）
+│   ├── discord-id-resolver.ts # Discord bot 用户 ID 解析
+│   ├── mission-planner.ts     # 计划生成逻辑 — 模板解析、task 规范化
+│   ├── mission-verifier.ts    # 验收逻辑 — 标准评估、结构验证
+│   ├── mission-actions.ts     # run-action 的处理器 — 重试、升级、通知标志
+│   ├── mission-watchdog-evaluator.ts # watchdog 核心评估逻辑
+│   ├── mission-notification.ts     # 通知系统核心（适配器）
 │   ├── mission-notification-templates.ts # 消息模板
 │   ├── mission-notification-mentions.ts  # Mention 解析
 │   ├── mission-agent-discovery.ts  # Agent 发现
-│   └── shell-utils.ts         # Shell 安全工具
+│   ├── dashboard-formatter.ts # Dashboard 嵌入格式化
+│   └── shell-utils.ts         # Shell 安全工具（已保留兼容）
 ├── mission-*.ts               # CLI 入口脚本
 ├── task-*.ts                  # 任务操作脚本
 ```
@@ -41,12 +52,23 @@ scripts/
 | `fs-utils.ts` | mission 工件目录的文件 I/O（带文件锁、原子写入） |
 | `mission-helpers.ts` | mission 加载/校验、CLI 参数解析、状态推导 |
 | `mission-commit.ts` | 集中式状态提交 + 变更检测 + 通知触发 |
+| `mission-dispatcher.ts` | 任务就绪检查、派发结果应用、摘要构建、Agent 映射默认值 |
 | `mission-dispatch-agent.ts` | 三级回退 Agent 派发（L1→L2→L3） |
+| `dispatch-queue.ts` | L3 回退：将派发条目写入磁盘队列文件 |
+| `dispatch-messenger.ts` | 在群聊中 @mention Agent，发送任务派发消息 |
+| `agent-session.ts` | 检查活跃 Agent session、通过 OpenClaw CLI 创建新 session |
+| `safe-exec.ts` | 安全执行 CLI 命令（返回结构化结果，不抛异常） |
+| `discord-id-resolver.ts` | 从静态映射或 OpenClaw 配置解析 Discord bot 用户 ID |
+| `mission-planner.ts` | 计划生成：模板解析、task 规范化、completionCriteria 构建 |
+| `mission-verifier.ts` | 验收逻辑：标准评估、结构验证、自动化测试检查 |
+| `mission-actions.ts` | run-action 的 action handler：重试、升级、通知标志 |
+| `mission-watchdog-evaluator.ts` | watchdog 核心评估逻辑（从 mission-watchdog.ts 提取） |
 | `mission-notification.ts` | 通知适配器（console/fake/discord/openclaw） |
 | `mission-notification-templates.ts` | 各状态变更的消息模板 |
 | `mission-notification-mentions.ts` | @mention 目标解析 |
 | `mission-agent-discovery.ts` | 群聊内可用 Agent 发现与匹配 |
-| `shell-utils.ts` | `escapeShellArg()` 防命令注入 |
+| `dashboard-formatter.ts` | 格式化 Discord embed 格式的 Dashboard 展示 |
+| `shell-utils.ts` | Shell 参数转义防命令注入 |
 
 ---
 

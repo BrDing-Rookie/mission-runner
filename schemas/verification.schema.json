@@ -53,27 +53,8 @@
     },
     "gaps": {
       "type": "array",
-      "description": "发现的差距/不足列表",
-      "items": {
-        "type": "object",
-        "required": ["description"],
-        "properties": {
-          "severity": {
-            "type": "string",
-            "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
-            "default": "MEDIUM"
-          },
-          "description": {
-            "type": "string",
-            "description": "差距描述"
-          },
-          "blocking": {
-            "type": "boolean",
-            "description": "是否阻塞完成",
-            "default": false
-          }
-        }
-      }
+      "description": "发现的差距/不足描述列表（字符串数组，与 types.ts Verification.gaps 一致）",
+      "items": { "type": "string" }
     },
     "recommendedNextTasks": {
       "type": "array",

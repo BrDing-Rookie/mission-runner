@@ -2,7 +2,7 @@
 
 import { pathToFileURL } from 'url';
 import { appendEvent, listMissionIds, readMission, writeMission } from './lib/fs-utils.ts';
-import { TERMINAL_STATUSES, DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from './lib/types.ts';
+import { TERMINAL_STATUSES, DEFAULT_WATCHDOG_CONFIG } from './lib/types.ts';
 import {
   applyResultToMission,
   evaluateMission,

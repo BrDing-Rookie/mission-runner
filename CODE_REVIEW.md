@@ -14,30 +14,25 @@
 
 ## P1 — 应该修复
 
-- [ ] **F2: dispatch queue 目录基于 missionsDir**
-  - 当前 `DISPATCH_QUEUE_DIR` 硬编码为 `extensions/mission-runner/dispatch-queue/`
-  - 应基于 `missionsDir` 或统一配置路径 (`scripts/lib/mission-dispatch-agent.ts:35`)
+- [x] **F2: dispatch queue 目录基于 missionsDir** ✅ (commit `1f2da8e`, 2026-04-02)
+  - `getDispatchQueueDir(missionsDir?)` 已支持基于 missionsDir 的路径解析
 
-- [ ] **F3: 双模式派发逻辑明确优先级**
-  - dispatch-agent 路径和 autoSpawn 路径可能同时执行
-  - 有 agent 的任务走 dispatch-agent，无 agent 的走 autoSpawn 建议 (`scripts/mission-dispatch.ts`)
+- [x] **F3: 双模式派发逻辑明确优先级** ✅ (commit `1f2da8e`, 2026-04-02)
+  - agent dispatch 优先于 autoSpawn，双模式派发优先级已明确
 
-- [ ] **F4: mentionInDiscord 确保 channel ID**
-  - `chatId` 可能是 channel 名称而非 ID，导致 `openclaw message send` 报错
-  - 确保 `chatId` 始终为 channel ID，或在 dispatch 前做 ID 解析 (`scripts/lib/mission-dispatch-agent.ts:77-80`)
+- [x] **F4: mentionInDiscord 确保 channel ID** ✅ (commit `1f2da8e`, 2026-04-02)
+  - channelId 已添加 snowflake 格式校验，确保为有效 Discord ID
 
 ## P2 — 建议优化
 
-- [ ] **F5: DispatchSummary 类型去重**
-  - `mission-dispatch.ts` 的 `buildDispatchSummary()` 与 `mission-dispatch-agent.ts` 的 `DispatchSummary` 定义重复
-  - 确认两边接口一致或合并 (`scripts/mission-dispatch.ts:108-127`)
+- [x] **F5: DispatchSummary 类型去重** ✅ (commit `1f2da8e`, 2026-04-02)
+  - DispatchSummary 已合并为单一定义
 
 - [x] **F6: 状态机补充 PLANNED→WAITING_BACKGROUND** ✅ (commit `de2f4e3`, 2026-04-02)
   - `types.ts` 中 `PLANNED` 的合法转换已包含 `WAITING_BACKGROUND`
 
-- [ ] **F7: dispatch 失败添加重试冷却**
-  - dispatch-agent 全级别失败时 task 保留 READY 状态，无重试计数/冷却
-  - 添加 `retryCount++` 和 `nextRetryAt` 时间戳防止无限重试
+- [x] **F7: dispatch 失败添加重试冷却** ✅ (commit `1f2da8e`, 2026-04-02)
+  - 已添加 MAX_DISPATCH_RETRIES + 指数退避，防止无限重试
 
 ---
 
@@ -46,12 +41,13 @@
 | 维度 | 评分 | 说明 |
 |------|------|------|
 | 功能完整性 | ⭐⭐⭐⭐ | create → plan → dispatch → watchdog → verify 全链路覆盖 |
-| 合并质量 | ⭐⭐⭐ | 核心功能正确合入，安全策略不一致（execSync） |
-| 类型安全 | ⭐⭐⭐⭐ | types.ts 定义清晰 |
-| 错误处理 | ⭐⭐⭐ | 有基础处理，缺重试冷却 |
-| 测试覆盖 | ⭐⭐⭐⭐ | 79 个测试覆盖核心路径 |
-| 安全性 | ⭐⭐⭐ | P0 execSync 问题需修复 |
+| 合并质量 | ⭐⭐⭐⭐ | 核心功能正确合入，安全策略统一（safe-exec） |
+| 类型安全 | ⭐⭐⭐⭐ | types.ts 定义清晰，DispatchSummary 单一定义 |
+| 错误处理 | ⭐⭐⭐⭐ | 完善的重试冷却（指数退避）+ channelId 校验 |
+| 测试覆盖 | ⭐⭐⭐⭐ | 123 个测试覆盖核心路径 |
+| 安全性 | ⭐⭐⭐⭐ | P0 execSync 已修复，safe-exec 封装 + snowflake 校验 |
 
 ---
 
 *Review 时间: 2026-04-01 18:00 GMT+8*
+*Update 时间: 2026-04-02 — 所有 P0/P1/P2 项已修复*

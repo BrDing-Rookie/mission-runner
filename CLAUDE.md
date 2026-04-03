@@ -35,7 +35,20 @@ create -> plan -> dispatch -> WAITING_BACKGROUND -> reconcile-background -> run-
 - **`scripts/lib/types.ts`** — 核心类型定义、状态枚举、状态迁移规则（`ALLOWED_TRANSITIONS`）。所有状态语义的单一事实源。
 - **`scripts/lib/fs-utils.ts`** — mission 工件目录的文件 I/O（mission.json 读写、events.jsonl 追加）
 - **`scripts/lib/mission-helpers.ts`** — mission 操作辅助函数
-- **`scripts/lib/mission-notification.ts`** — 通知 sender/adapter 结构（console/fake/discord）
+- **`scripts/lib/mission-commit.ts`** — 集中式状态提交 + 变更检测 + 通知触发
+- **`scripts/lib/mission-dispatcher.ts`** — 任务就绪检查、派发结果应用、摘要构建
+- **`scripts/lib/mission-dispatch-agent.ts`** — 三级回退 Agent 派发（L1→L2→L3）
+- **`scripts/lib/dispatch-queue.ts`** — L3 回退：将派发条目写入磁盘队列
+- **`scripts/lib/dispatch-messenger.ts`** — 在群聊中 @mention Agent 发送任务派发消息
+- **`scripts/lib/agent-session.ts`** — Agent session 检查与创建
+- **`scripts/lib/safe-exec.ts`** — 安全 CLI 命令执行封装（防注入，返回结构化结果）
+- **`scripts/lib/discord-id-resolver.ts`** — Discord bot 用户 ID 解析
+- **`scripts/lib/mission-planner.ts`** — 计划生成逻辑
+- **`scripts/lib/mission-verifier.ts`** — 验收逻辑（标准评估、结构验证）
+- **`scripts/lib/mission-actions.ts`** — run-action 的 action handler（重试、升级）
+- **`scripts/lib/mission-watchdog-evaluator.ts`** — watchdog 核心评估逻辑
+- **`scripts/lib/mission-notification.ts`** — 通知 sender/adapter 结构（console/fake/discord/openclaw）
+- **`scripts/lib/dashboard-formatter.ts`** — Dashboard Discord embed 格式化
 - **`schemas/*.schema.json`** — mission/task/verification 的 JSON Schema 契约
 
 ### 关键脚本

@@ -178,24 +178,99 @@ ln -s /path/to/mission-runner/skills/mission-controller \
 ### mission.json 核心字段
 
 ```typescript
+interface MissionOwner {
+  sessionKey: string;
+  channel?: 'discord' | 'slack' | 'cli' | 'web' | 'api';
+  chatId?: string;
+  requestMessageId?: string;
+  userMentionTag?: string;
+}
+
+interface CompletionCriterion {
+  id: string;
+  description: string;
+  required?: boolean;
+  verified?: boolean;
+}
+
+interface MissionArtifact {
+  path: string;
+  type: 'document' | 'code' | 'data' | 'image' | 'log' | 'summary';
+  description?: string;
+  generatedAt?: string;
+}
+
+interface RiskPolicy {
+  autoAllowed?: string[];    // 自动允许的工具/操作列表
+  askOnce?: string[];        // 首次询问后续允许的操作列表
+  mustConfirm?: string[];    // 每次必须确认的高风险操作列表
+}
+
+interface BackgroundProcess {
+  processId: string;
+  taskId: string;
+  status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'TIMEOUT';
+  startedAt: string;
+  endedAt?: string | null;
+  outputPath?: string | null;
+}
+
+interface ActiveSession {
+  sessionKey: string;
+  agentType?: string;
+  startedAt?: string;
+  purpose?: string;
+}
+
+interface VerificationCriterionResult {
+  criterionId: string;
+  passed: boolean;
+  reason?: string | null;
+}
+
+interface Verification {
+  status: VerificationStatus;
+  lastCheckedAt?: string | null;
+  gaps?: string[];
+  summary?: string | null;
+  criteriaResults?: VerificationCriterionResult[];
+}
+
+interface Escalation {
+  level?: 'INFO' | 'WARNING' | 'CRITICAL' | null;
+  reason?: string | null;
+  escalatedAt?: string | null;
+}
+
+interface MissionFlags {
+  notifiedStart?: boolean;
+  notifiedComplete?: boolean;
+  notifiedEscalation?: boolean;
+  userUpdated?: boolean;
+  notifiedTransitions?: Record<string, boolean>;
+}
+
 interface Mission {
   missionId: string;
   title: string;
   goal: string;
   status: MissionStatus;
-  owner: MissionOwner;
+  owner?: MissionOwner;           // 可选
   createdAt: string;
   updatedAt: string;
-  lastProgressAt: string;
-  nextWakeAt: string | null;
-  currentIteration: number;
-  maxIterations: number;
-  completionCriteria: string[];
-  tasks: Task[];
-  artifacts: string[];
-  backgroundProcesses: BackgroundProcess[];
-  verification: VerificationState;
-  flags: MissionFlags;
+  lastProgressAt?: string;
+  nextWakeAt?: string | null;
+  currentIteration?: number;
+  maxIterations?: number;
+  completionCriteria?: CompletionCriterion[];   // 对象数组，非字符串数组
+  riskPolicy?: RiskPolicy;
+  tasks?: Task[];
+  artifacts?: MissionArtifact[];               // 对象数组，非字符串数组
+  backgroundProcesses?: BackgroundProcess[];
+  activeSessions?: ActiveSession[];
+  verification?: Verification;
+  escalation?: Escalation;
+  flags?: MissionFlags;
   metadata?: Record<string, unknown>;
 }
 ```
@@ -203,29 +278,78 @@ interface Mission {
 ### Task 结构
 
 ```typescript
+interface TaskArtifact {
+  path: string;
+  type: string;
+  description?: string;
+}
+
 interface Task {
   taskId: string;
   title: string;
-  type: string;
+  description?: string;
+  type: TaskType;
   status: TaskStatus;
-  agent?: string;
-  dependsOn: string[];
+  agent?: string | null;
+  sessionKey?: string | null;
+  dependsOn?: string[];
+  priority?: number;
+  createdAt?: string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  estimatedDuration?: number | null;
+  timeout?: number | null;
+  resultSummary?: string | null;
+  artifacts?: TaskArtifact[];         // 对象数组，非字符串数组
+  retryCount?: number;
+  maxRetries?: number;
+  lastError?: string | null;
+  backgroundProcessId?: string | null;
+  phase?: string;                     // 展示层分组标签
+  fileBoundary?: string[];            // 允许修改的文件/目录范围
   config?: Record<string, unknown>;
-  artifacts: string[];
-  retryCount: number;
-  maxRetries: number;
-  lastError?: string;
 }
 ```
 
 ---
 
-## Watchdog 动作类型
+## Watchdog 类型
+
+### WatchdogCheckResult
+
+```typescript
+interface WatchdogCheckResult {
+  missionId: string;
+  currentStatus: MissionStatus;
+  action: MissionAction;
+  reason: string;
+  suggestedNextWakeAt?: string;   // 建议的下次检查时间
+  relatedTaskIds?: string[];       // 相关任务 IDs
+  context?: Record<string, unknown>;
+}
+```
+
+### WatchdogConfig
+
+```typescript
+interface WatchdogConfig {
+  missionsDir: string;
+  taskTimeoutMs: number;                // 任务超时阈值（毫秒），默认 5 分钟
+  backgroundCheckIntervalMs: number;    // 后台进程检查间隔（毫秒），默认 30 秒
+  maxIdleTimeMs: number;                // 最大允许空转时间（毫秒），默认 10 分钟
+  taskStallThresholdMs?: number;        // 单 task 停滞超时（毫秒），默认 30 分钟
+  dryRun: boolean;
+  verbose: boolean;
+}
+```
+
+### Watchdog 动作类型（MissionAction）
 
 | 动作 | 触发条件 | 说明 |
 |------|---------|------|
 | `NONE` | 无需操作 | 延后 nextWakeAt |
 | `CHECK_BACKGROUND` | 后台进程待检查 | 调用 reconcile-background |
+| `COLLECT_RESULTS` | 后台结果可回收 | 回收后台进程结果 |
 | `RESUME_TASK` | 到达 nextWakeAt | 恢复执行 |
 | `TRIGGER_VERIFY` | 所有 task 终态 | 触发验证 |
 | `RETRY_TASK` | idle 超时 + 重试预算未耗尽 | 重试 |

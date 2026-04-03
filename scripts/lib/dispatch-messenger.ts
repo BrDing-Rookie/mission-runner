@@ -33,6 +33,12 @@ export function mentionInDiscord(
     return false;
   }
 
+  // 校验 Discord snowflake ID 格式（纯数字，17-20 位）
+  if (!/^\d{17,20}$/.test(channelId)) {
+    console.warn(`[dispatch-messenger] mentionInDiscord: channelId is not a valid Discord snowflake ID (expected 17-20 digit number), got: "${channelId}"`);
+    return false;
+  }
+
   // 校验输入防注入
   if (channelId.length > 256 || /[\n\r\0]/.test(channelId)) {
     console.error('[dispatch-messenger] mentionInDiscord: invalid channelId');

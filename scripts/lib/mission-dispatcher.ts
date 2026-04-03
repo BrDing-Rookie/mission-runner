@@ -6,7 +6,7 @@
  */
 
 import { dispatchTaskToAgent, type DispatchResult, type DispatchSummary } from './mission-dispatch-agent.ts';
-import { buildTaskEnvelope, deriveMissionStatus } from './mission-helpers.ts';
+import { buildTaskEnvelope } from './mission-helpers.ts';
 import type { BackgroundProcess, Mission, Task } from './types.ts';
 
 // ── Agent Map ──────────────────────────────────────────────────────────────────
@@ -42,6 +42,26 @@ export function isBackgroundCandidate(task: Task): boolean {
 
 export function needsAgentDispatch(task: Task): boolean {
   return !!(task.agent ?? task.config?.agentId);
+}
+
+// ── Dispatch Retry Helpers ─────────────────────────────────────────────────────
+
+export const MAX_DISPATCH_RETRIES = 3;
+const BASE_BACKOFF_MS = 30_000; // 30s base, doubled each retry
+
+function getDispatchRetryCount(task: Task): number {
+  return (task.config?.dispatchRetryCount as number | undefined) ?? 0;
+}
+
+function isDispatchCoolingDown(task: Task, nowMs: number): boolean {
+  const retryCount = getDispatchRetryCount(task);
+  if (retryCount === 0) return false;
+  const lastAttempt = task.config?.lastDispatchAttempt;
+  if (typeof lastAttempt !== 'string') return false;
+  const lastAttemptMs = Date.parse(lastAttempt);
+  if (Number.isNaN(lastAttemptMs)) return false;
+  const backoffMs = BASE_BACKOFF_MS * Math.pow(2, retryCount - 1);
+  return (nowMs - lastAttemptMs) < backoffMs;
 }
 
 export function applyDispatchResult(task: Task, result: DispatchResult): Task {
@@ -118,19 +138,33 @@ export function dispatchReadyTasks(
   const updatedTasks: Task[] = (mission.tasks ?? []).map((task): Task => {
     if (!isReady(task)) return task;
 
-    // Build spawn instruction for auto-spawn mode
-    if (options.autoSpawn) {
-      const agentId = options.agentMap[task.type] ?? task.agent ?? task.type;
-      const envelope = buildTaskEnvelope(task, mission, agentId);
-      spawnInstructions.push({ taskId: task.taskId, agentId, taskType: task.type, envelope });
-    }
-
-    // Agent dispatch path
+    // Agent dispatch path takes priority — no spawnInstruction when agent dispatch is used
     if (needsAgentDispatch(task)) {
       if (task.sessionKey) {
         runningTaskIds.push(task.taskId);
         startedTaskIds.push(task.taskId);
         return { ...task, status: 'RUNNING', startedAt: timestamp };
+      }
+
+      const nowMs = Date.now();
+      const dispatchRetryCount = getDispatchRetryCount(task);
+
+      // Max retries exceeded → fail the task permanently
+      if (dispatchRetryCount >= MAX_DISPATCH_RETRIES) {
+        failedDispatchTaskIds.push(task.taskId);
+        console.error(`[mission-dispatch] max dispatch retries (${MAX_DISPATCH_RETRIES}) exceeded, marking FAILED | taskId=${task.taskId}`);
+        return {
+          ...task,
+          status: 'FAILED',
+          lastError: `Dispatch failed after ${MAX_DISPATCH_RETRIES} attempts: ${task.lastError ?? 'no error details'}`,
+        };
+      }
+
+      // Cooldown check → skip this watchdog cycle
+      if (isDispatchCoolingDown(task, nowMs)) {
+        const backoffMs = BASE_BACKOFF_MS * Math.pow(2, dispatchRetryCount - 1);
+        console.log(`[mission-dispatch] task in dispatch cooldown, skipping | taskId=${task.taskId} retryCount=${dispatchRetryCount} backoffMs=${backoffMs}`);
+        return task;
       }
 
       const result = dispatchTaskToAgent(task, mission, options.missionsDir);
@@ -144,8 +178,24 @@ export function dispatchReadyTasks(
       }
 
       failedDispatchTaskIds.push(task.taskId);
-      console.error(`[mission-dispatch] dispatch failed, task remains READY | taskId=${task.taskId}`);
-      return { ...updatedTask, lastError: result.error, status: 'READY' };
+      console.error(`[mission-dispatch] dispatch failed, task remains READY | taskId=${task.taskId} retryCount=${dispatchRetryCount + 1}`);
+      return {
+        ...updatedTask,
+        lastError: result.error,
+        status: 'READY',
+        config: {
+          ...(updatedTask.config ?? {}),
+          dispatchRetryCount: dispatchRetryCount + 1,
+          lastDispatchAttempt: timestamp,
+        },
+      };
+    }
+
+    // Build spawn instruction for auto-spawn mode (only when not agent-dispatched)
+    if (options.autoSpawn) {
+      const agentId = options.agentMap[task.type] ?? task.agent ?? task.type;
+      const envelope = buildTaskEnvelope(task, mission, agentId);
+      spawnInstructions.push({ taskId: task.taskId, agentId, taskType: task.type, envelope });
     }
 
     // Background candidate path
