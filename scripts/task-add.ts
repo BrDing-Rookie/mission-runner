@@ -15,6 +15,7 @@
 import { pathToFileURL } from 'url';
 import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { nowIso, requireMission } from './lib/mission-helpers.ts';
+import { isTransitionAllowed } from './lib/types.ts';
 import type { Mission, MissionStatus, Task, TaskStatus, TaskType } from './lib/types.ts';
 
 // ==================== CLI Arg Parsing ====================
@@ -38,6 +39,7 @@ const ALLOWED_MISSION_STATUSES = new Set<MissionStatus>([
   'WAITING_BACKGROUND',
   'WAITING_EXTERNAL',
   'PLANNED',
+  'VERIFYING',
 ]);
 
 function parseTaskAddArgs(argv: string[]): TaskAddCliArgs {
@@ -160,9 +162,15 @@ export function addTask(args: TaskAddCliArgs): TaskAddResult {
 
   const updatedTasks = [...tasks, newTask];
 
-  // Mission status unchanged (adding a task should not change current status)
+  // If mission is VERIFYING, auto-revert to RUNNING to allow the new task to be dispatched
+  let newMissionStatus: MissionStatus = mission.status;
+  if (mission.status === 'VERIFYING' && isTransitionAllowed('VERIFYING', 'RUNNING')) {
+    newMissionStatus = 'RUNNING';
+  }
+
   const updatedMission: Mission = {
     ...mission,
+    status: newMissionStatus,
     tasks: updatedTasks,
     updatedAt: timestamp,
     lastProgressAt: timestamp,
@@ -178,9 +186,10 @@ export function addTask(args: TaskAddCliArgs): TaskAddResult {
       eventExtras: {
         taskId: args.taskId,
         title: args.title,
-        type: args.type,
+        taskType: args.type,
         dependsOn: args.dependsOn,
         status: initialStatus,
+        missionStatusReverted: mission.status !== newMissionStatus ? `${mission.status}→${newMissionStatus}` : undefined,
       },
     });
 
@@ -196,7 +205,7 @@ export function addTask(args: TaskAddCliArgs): TaskAddResult {
     type: args.type,
     dependsOn: args.dependsOn,
     status: initialStatus,
-    missionStatus: mission.status,
+    missionStatus: newMissionStatus,
     changed: true,
     dryRun: args.dryRun,
   };

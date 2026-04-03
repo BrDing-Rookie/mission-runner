@@ -9,6 +9,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { Mission } from './types.ts';
+import { MissionSchema } from './schemas.ts';
 
 /**
  * 确保目录存在
@@ -49,7 +50,15 @@ export function readMission(missionsDir: string, missionId: string): Mission | n
 
   try {
     const content = readFileSync(missionPath, 'utf-8');
-    return JSON.parse(content) as Mission;
+    const parsed = JSON.parse(content);
+    const validation = MissionSchema.safeParse(parsed);
+    if (!validation.success) {
+      const errorDetails = validation.error.errors
+        .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+        .join('; ');
+      console.warn(`[WARN] Mission ${missionId} failed schema validation: ${errorDetails}`);
+    }
+    return parsed as Mission;
   } catch (error) {
     console.error(`[ERROR] Failed to read mission ${missionId}:`, error);
     return null;
@@ -67,6 +76,13 @@ export function writeMission(missionsDir: string, mission: Mission): boolean {
   const missionPath = join(missionDir, 'mission.json');
 
   try {
+    const validation = MissionSchema.safeParse(mission);
+    if (!validation.success) {
+      const errorDetails = validation.error.errors
+        .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+        .join('; ');
+      console.warn(`[WARN] Mission ${mission.missionId} failed schema validation before write: ${errorDetails}`);
+    }
     ensureDir(missionDir);
     writeFileSync(missionPath, JSON.stringify(mission, null, 2), 'utf-8');
     return true;

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+mission-runner.log
+.env
+.env.*
+missions/
+
+# Claude Code session 管理（非 mission-runner 组件）
+scripts/service/
+skills/cc-session/

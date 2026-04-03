@@ -2,7 +2,7 @@
  * Mission Runner 核心类型定义
  * 对应 schemas/*.schema.json 的 TypeScript 类型
  *
- * TODO(Phase 2): 与 Zod schema 整合做运行时校验
+ * Zod schema 已在 schemas.ts 中实现，readMission/writeMission 已接入运行时校验
  */
 
 // ==================== Mission Status ====================
@@ -293,7 +293,7 @@ export const ALLOWED_TRANSITIONS: Record<MissionStatus, MissionStatus[]> = {
   RUNNING: ['WAITING_BACKGROUND', 'WAITING_EXTERNAL', 'VERIFYING', 'BLOCKED_HIGH_RISK', 'ITERATING', 'FAILED'],
   WAITING_BACKGROUND: ['RUNNING', 'VERIFYING', 'FAILED'],
   WAITING_EXTERNAL: ['RUNNING', 'VERIFYING', 'FAILED'],
-  VERIFYING: ['COMPLETED', 'ITERATING', 'BLOCKED_HIGH_RISK', 'ESCALATED', 'FAILED'],
+  VERIFYING: ['COMPLETED', 'ITERATING', 'BLOCKED_HIGH_RISK', 'ESCALATED', 'FAILED', 'RUNNING'],
   ITERATING: ['RUNNING', 'FAILED'],
   BLOCKED_HIGH_RISK: ['RUNNING', 'ESCALATED', 'FAILED'],
   ESCALATED: ['RUNNING', 'FAILED', 'COMPLETED'], // 人工介入后可恢复
