@@ -107,3 +107,86 @@ missions/<mission-id>/
 - node:test 内置测试框架
 - Zod (运行时校验，尚未全面接入)
 - 无构建即可运行（tsx 直接执行）
+
+## Development Doc Workflow (MANDATORY)
+
+### 编码前 — 必须先创建开发文档
+
+在对 `scripts/` 下的任何源文件进行功能开发、Bug 修复、重构之前，必须：
+
+1. 确定变更所属模块（见 `dev-docs/` 下的模块目录）
+2. 在 `dev-docs/<module>/` 下创建开发文档，命名格式 `YYYY-MM-DD-<slug>.md`
+3. 在 `dev-docs/BACKLOG.md` 中添加该文档的索引条目
+4. 开发文档必须包含：目标、涉及文件、方案、验收标准
+
+**违反此规则直接开始编码是不允许的。** 如果收到开发指令但没有对应的开发文档，第一步永远是创建开发文档，而不是开始写代码。
+
+### 编码后 — 必须更新文档索引
+
+开发完成（代码 + 测试通过）后，必须：
+
+1. 将开发文档状态改为「已完成」
+2. 从 `dev-docs/BACKLOG.md` 移除该条目，添加到 `dev-docs/DONE.md`
+3. 根据实际变更更新 `project-docs/<module>.md` 的功能说明
+
+### 开发文档模板
+
+```
+# <开发任务标题>
+
+> 模块: <module>
+> 创建日期: YYYY-MM-DD
+> 状态: 待开发 | 进行中 | 已完成
+> 关联 Phase: P1/P2/P3
+
+## 目标
+<本次开发要解决什么问题>
+
+## 涉及文件
+- `scripts/lib/xxx.ts` — 修改点说明
+
+## 方案
+<技术方案描述>
+
+## 验收标准
+- [ ] 标准 1
+- [ ] 标准 2
+
+## 开发记录
+### YYYY-MM-DD
+- 实际做了什么
+```
+
+### 不适用的场景
+
+以下操作无需创建开发文档：
+- 纯文档修改（不涉及代码变更）
+- 格式化、typo 修复等微小改动
+- 配置文件调整（如 tsconfig.json、package.json）
+
+## Discord Session 管理指令
+
+当用户通过 Discord 发送以下消息时，识别为 session 管理指令：
+
+### 清空 Session
+- 触发词: "清空session"、"clear session"、"/clear"、"清空对话"、"重新开始"、"clear"
+- 流程:
+  1. 先通过 Discord reply 回复"正在清空当前 session，服务将重启..."
+  2. 执行: `bash scripts/service/claude-session-clear.sh <chat_id>`（传入当前 Discord chat_id）
+     - 脚本会重启 service 彻底清空上下文
+     - 重启成功后自动通过 Discord API 发送"Session 已清空"通知
+  3. 注意: 执行后当前进程会被终止，新实例自动拉起，脚本负责发送最终通知
+
+### 列出 Session
+- 触发词: "列出session"、"list sessions"、"查看session"、"历史session"
+- 流程:
+  1. 执行: `bash scripts/service/claude-session-resume.sh list`
+  2. 将结果格式化后通过 Discord reply 返回
+  3. 提示用户发送 session 短 ID 来恢复
+
+### 恢复 Session
+- 触发词: "恢复 <id>"、"resume <id>"、"切换到 <id>"
+- 流程:
+  1. 先通过 Discord reply 回复"正在恢复 session <id>..."
+  2. 执行: `bash scripts/service/claude-session-resume.sh <id>`
+  3. 注意: 执行后上下文会切换到目标 session

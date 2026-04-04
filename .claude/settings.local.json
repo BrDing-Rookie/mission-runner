@@ -1,0 +1,13 @@
+{
+  "remote": {
+    "defaultEnvironmentId": "env_011tN3uekvUMCB1bYECrMgbb"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hook": "bash .claude/hooks/check-dev-doc.sh"
+      }
+    ]
+  }
+}

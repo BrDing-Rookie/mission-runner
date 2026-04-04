@@ -107,5 +107,12 @@ export function buildDispatchMessage(task: Task, mission: Mission, missionsDir: 
     '如果任务失败，将 `--status COMPLETED` 改为 `--status FAILED`，并在 `--summary` 中说明原因。',
   );
 
+  lines.push(
+    '',
+    '📋 **开发文档规则**：编码前必须先在 `dev-docs/<module>/` 下创建当日开发文档，',
+    '并在 `BACKLOG.md` 中登记。完成后更新 `DONE.md` 和 `project-docs/`。',
+    '详见 CLAUDE.md "Development Doc Workflow" 章节。',
+  );
+
   return lines.join('\n');
 }
