@@ -60,6 +60,17 @@ export const VerificationStatusSchema = z.enum([
 
 export const EscalationLevelSchema = z.enum(['INFO', 'WARNING', 'CRITICAL']).nullable();
 
+// ==================== Token Usage Schema ====================
+
+export const TokenUsageSchema = z.object({
+  inputTokens: z.number().nonnegative().optional(),
+  outputTokens: z.number().nonnegative().optional(),
+  totalTokens: z.number().nonnegative().optional(),
+  model: z.string().optional(),
+  calls: z.number().nonnegative().optional(),
+  estimatedCostUsd: z.number().nonnegative().optional(),
+}).passthrough();
+
 // ==================== Nested Type Schemas ====================
 
 export const MissionOwnerSchema = z.object({
@@ -165,7 +176,10 @@ export const TaskSchema = z.object({
   backgroundProcessId: z.string().nullable().optional(),
   phase: z.string().optional(),
   fileBoundary: z.array(z.string()).optional(),
+  produces: z.array(z.string()).optional(),
+  consumes: z.array(z.string()).optional(),
   config: z.record(z.string(), z.unknown()).optional(),
+  usage: TokenUsageSchema.optional(),
 }).passthrough();
 
 // ==================== Mission Schema ====================
@@ -192,6 +206,7 @@ export const MissionSchema = z.object({
   escalation: EscalationSchema.optional(),
   flags: MissionFlagsSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  totalUsage: TokenUsageSchema.optional(),
 }).passthrough();
 
 // ==================== validateMission 辅助函数 ====================

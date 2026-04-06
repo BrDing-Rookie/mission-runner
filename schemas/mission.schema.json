@@ -321,6 +321,18 @@
       "type": "object",
       "description": "扩展元数据",
       "additionalProperties": true
+    },
+    "totalUsage": {
+      "type": "object",
+      "description": "汇总所有 task 的 token 消耗",
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "model": { "type": "string" },
+        "calls": { "type": "integer", "minimum": 0 },
+        "estimatedCostUsd": { "type": "number", "minimum": 0 }
+      }
     }
   },
   "definitions": {}

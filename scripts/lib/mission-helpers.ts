@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { appendEvent, readMission, safeWriteFile, writeMission } from './fs-utils.ts';
 import { commitMissionUpdate } from './mission-commit.ts';
-import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskPhase, TaskStatus, TaskType, VerificationStatus } from './types.ts';
+import type { CompletionCriterion, Mission, MissionArtifact, MissionStatus, RiskPolicy, Task, TaskArtifact, TaskPhase, TaskStatus, TaskType, TokenUsage, VerificationStatus } from './types.ts';
 
 // Re-export for convenience
 export type { TaskType } from './types.ts';
@@ -270,4 +270,140 @@ export function buildTasksFromJSON(jsonInput: string, _mission: Mission): Task[]
     task.phase = raw.phase ?? derivePhaseFromTask(task);
     return task;
   });
+}
+
+// ==================== Token Usage Aggregation ====================
+
+/**
+ * 汇总 mission 中所有 task 的 usage，返回 TokenUsage。
+ * 对数值字段求和，model 取出现次数最多的。
+ * 若所有 task 均无 usage，返回 undefined。
+ */
+export function aggregateUsage(mission: Mission): TokenUsage | undefined {
+  const tasks = mission.tasks ?? [];
+  const usages = tasks.map((t) => t.usage).filter((u): u is TokenUsage => u !== undefined && u !== null);
+
+  if (usages.length === 0) return undefined;
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let calls = 0;
+  let estimatedCostUsd = 0;
+  const modelCounts = new Map<string, number>();
+
+  for (const u of usages) {
+    inputTokens += u.inputTokens ?? 0;
+    outputTokens += u.outputTokens ?? 0;
+    totalTokens += u.totalTokens ?? 0;
+    calls += u.calls ?? 0;
+    estimatedCostUsd += u.estimatedCostUsd ?? 0;
+    if (u.model) {
+      modelCounts.set(u.model, (modelCounts.get(u.model) ?? 0) + 1);
+    }
+  }
+
+  // Pick most frequent model
+  let topModel: string | undefined;
+  let topCount = 0;
+  for (const [model, count] of modelCounts) {
+    if (count > topCount) {
+      topCount = count;
+      topModel = model;
+    }
+  }
+
+  const result: TokenUsage = {};
+  if (inputTokens > 0) result.inputTokens = inputTokens;
+  if (outputTokens > 0) result.outputTokens = outputTokens;
+  if (totalTokens > 0) result.totalTokens = totalTokens;
+  if (calls > 0) result.calls = calls;
+  if (estimatedCostUsd > 0) result.estimatedCostUsd = estimatedCostUsd;
+  if (topModel !== undefined) result.model = topModel;
+
+  return result;
+}
+
+// ==================== Artifact Sharing ====================
+
+export interface ResolvedArtifact {
+  key: string;
+  artifact: TaskArtifact;
+  producerTaskId: string;
+}
+
+/**
+ * 解析 task 声明的 consumes，查找已完成的上游 task 的匹配 artifacts。
+ * 返回 { key, artifact, producerTaskId }[]
+ *
+ * 匹配规则（按优先级）：
+ * 1. artifact.type === key
+ * 2. artifact.path === key（精确匹配）
+ * 3. artifact.path 以 key 开头（前缀匹配）
+ */
+export function resolveConsumedArtifacts(
+  mission: Mission,
+  task: Task
+): ResolvedArtifact[] {
+  if (!task.consumes || task.consumes.length === 0) {
+    return [];
+  }
+
+  const results: ResolvedArtifact[] = [];
+  const completedTasks = (mission.tasks ?? []).filter(
+    (t) => t.status === 'COMPLETED' && t.produces && t.produces.length > 0
+  );
+
+  for (const key of task.consumes) {
+    const producer = completedTasks.find((t) => t.produces?.includes(key));
+    if (!producer) continue;
+
+    const taskArtifacts = producer.artifacts ?? [];
+    const matched =
+      taskArtifacts.find((a) => a.type === key) ??
+      taskArtifacts.find((a) => a.path === key) ??
+      taskArtifacts.find((a) => a.path.startsWith(key));
+
+    if (matched) {
+      results.push({ key, artifact: matched, producerTaskId: producer.taskId });
+    }
+  }
+
+  return results;
+}
+
+export interface DispatchTaskEnvelope {
+  missionId: string;
+  taskId: string;
+  title: string;
+  description?: string;
+  type: string;
+  dependsOn?: string[];
+  config?: Record<string, unknown>;
+  availableArtifacts?: ResolvedArtifact[];
+}
+
+/**
+ * 构建 task dispatch envelope，注入上游可用 artifact 信息。
+ * 如果 task 有 consumes 声明，调用 resolveConsumedArtifacts 并将结果放入 availableArtifacts。
+ */
+export function buildDispatchEnvelope(mission: Mission, task: Task): DispatchTaskEnvelope {
+  const envelope: DispatchTaskEnvelope = {
+    missionId: mission.missionId,
+    taskId: task.taskId,
+    title: task.title,
+    description: task.description,
+    type: task.type,
+    dependsOn: task.dependsOn,
+    config: task.config,
+  };
+
+  if (task.consumes && task.consumes.length > 0) {
+    const resolved = resolveConsumedArtifacts(mission, task);
+    if (resolved.length > 0) {
+      envelope.availableArtifacts = resolved;
+    }
+  }
+
+  return envelope;
 }

@@ -14,7 +14,7 @@
 
 import { pathToFileURL } from 'url';
 import { commitMissionUpdate } from './lib/mission-commit.ts';
-import { deriveMissionStatus, nowIso, requireMission } from './lib/mission-helpers.ts';
+import { aggregateUsage, deriveMissionStatus, nowIso, requireMission } from './lib/mission-helpers.ts';
 import type { Mission, Task, TaskStatus } from './lib/types.ts';
 
 // ==================== CLI Arg Parsing ====================
@@ -27,6 +27,9 @@ interface TaskUpdateCliArgs {
   summary: string;
   artifacts: string[];
   dryRun: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  model?: string;
 }
 
 const ALLOWED_REPORT_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED']);
@@ -53,6 +56,9 @@ function parseTaskUpdateArgs(argv: string[]): TaskUpdateCliArgs {
     else if (arg === '--summary' && next) { args.summary = next; i += 1; }
     else if (arg === '--artifact' && next) { args.artifacts.push(next); i += 1; }
     else if (arg === '--dry-run') { args.dryRun = true; }
+    else if (arg === '--input-tokens' && next) { const n = parseInt(next, 10); if (Number.isNaN(n)) throw new Error(`--input-tokens must be a number, got "${next}"`); args.inputTokens = n; i += 1; }
+    else if (arg === '--output-tokens' && next) { const n = parseInt(next, 10); if (Number.isNaN(n)) throw new Error(`--output-tokens must be a number, got "${next}"`); args.outputTokens = n; i += 1; }
+    else if (arg === '--model' && next) { args.model = next; i += 1; }
   }
 
   return args;
@@ -134,6 +140,18 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
     ],
   };
 
+  if (args.inputTokens !== undefined || args.outputTokens !== undefined || args.model !== undefined) {
+    const inputTokens = args.inputTokens;
+    const outputTokens = args.outputTokens;
+    updatedTask.usage = {
+      inputTokens,
+      outputTokens,
+      totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0),
+      model: args.model,
+      calls: 1,
+    };
+  }
+
   const updatedTasks = [...tasks];
   updatedTasks[taskIndex] = updatedTask;
 
@@ -162,12 +180,19 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
   // Derive mission status
   const newMissionStatus = deriveMissionStatus(mission.status, updatedTasks);
 
-  const updatedMission: Mission = {
+  const missionWithTasks: Mission = {
     ...mission,
     status: newMissionStatus,
     tasks: updatedTasks,
     updatedAt: timestamp,
     lastProgressAt: timestamp,
+  };
+
+  const aggregated = aggregateUsage(missionWithTasks);
+
+  const updatedMission: Mission = {
+    ...missionWithTasks,
+    ...(aggregated !== undefined ? { totalUsage: aggregated } : {}),
   };
 
   if (!args.dryRun) {

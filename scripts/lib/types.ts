@@ -85,6 +85,17 @@ export type VerificationStatus =
 
 export type EscalationLevel = 'INFO' | 'WARNING' | 'CRITICAL' | null;
 
+// ==================== Token Usage ====================
+
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  model?: string;
+  calls?: number;
+  estimatedCostUsd?: number;
+}
+
 // ==================== Core Interfaces ====================
 
 export interface MissionOwner {
@@ -133,7 +144,13 @@ export interface Task {
   phase?: string;
   /** 该 task 允许修改的文件/目录范围。dispatch 时写入消息，帮助并行任务避免冲突 */
   fileBoundary?: string[];
+  /** 该 task 承诺产出的 artifact key 列表 */
+  produces?: string[];
+  /** 该 task 需要消费的上游 task artifact key 列表 */
+  consumes?: string[];
   config?: Record<string, unknown>;
+  /** LLM token 消耗统计 */
+  usage?: TokenUsage;
 }
 
 export interface TaskArtifact {
@@ -219,6 +236,8 @@ export interface Mission {
   escalation?: Escalation;
   flags?: MissionFlags;
   metadata?: Record<string, unknown>;
+  /** 汇总所有 task 的 token 消耗 */
+  totalUsage?: TokenUsage;
 }
 
 // ==================== Watchdog Types ====================
