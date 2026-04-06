@@ -30,6 +30,9 @@ interface TaskUpdateCliArgs {
   inputTokens?: number;
   outputTokens?: number;
   model?: string;
+  approve?: boolean;
+  reject?: boolean;
+  approvalNote?: string;
 }
 
 const ALLOWED_REPORT_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED']);
@@ -59,6 +62,9 @@ function parseTaskUpdateArgs(argv: string[]): TaskUpdateCliArgs {
     else if (arg === '--input-tokens' && next) { const n = parseInt(next, 10); if (Number.isNaN(n)) throw new Error(`--input-tokens must be a number, got "${next}"`); args.inputTokens = n; i += 1; }
     else if (arg === '--output-tokens' && next) { const n = parseInt(next, 10); if (Number.isNaN(n)) throw new Error(`--output-tokens must be a number, got "${next}"`); args.outputTokens = n; i += 1; }
     else if (arg === '--model' && next) { args.model = next; i += 1; }
+    else if (arg === '--approve') { args.approve = true; }
+    else if (arg === '--reject') { args.reject = true; }
+    else if (arg === '--approval-note' && next) { args.approvalNote = next; i += 1; }
   }
 
   return args;
@@ -67,8 +73,13 @@ function parseTaskUpdateArgs(argv: string[]): TaskUpdateCliArgs {
 function validateArgs(args: TaskUpdateCliArgs): void {
   if (!args.missionId.trim()) throw new Error('Missing required --mission-id');
   if (!args.taskId.trim()) throw new Error('Missing required --task-id');
-  if (!ALLOWED_REPORT_STATUSES.has(args.status)) {
-    throw new Error(`Invalid --status "${args.status}": must be one of ${[...ALLOWED_REPORT_STATUSES].join(', ')}`);
+  if (args.approve && args.reject) {
+    throw new Error('Cannot specify both --approve and --reject');
+  }
+  if (!args.approve && !args.reject) {
+    if (!ALLOWED_REPORT_STATUSES.has(args.status)) {
+      throw new Error(`Invalid --status "${args.status}": must be one of ${[...ALLOWED_REPORT_STATUSES].join(', ')}`);
+    }
   }
 }
 
@@ -96,7 +107,95 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
 
   const task = tasks[taskIndex];
 
-  // Idempotency: if already in the target status, noop
+  // Approval path: --approve or --reject (before terminal/idempotency checks for status)
+  if (args.approve || args.reject) {
+    // Idempotency: already approved/rejected → noop
+    if (args.approve && task.approvalStatus === 'APPROVED') {
+      console.log(`[task-update] noop | missionId=${args.missionId} | taskId=${args.taskId} | reason=already APPROVED`);
+      return {
+        missionId: args.missionId,
+        taskId: args.taskId,
+        taskStatusFrom: task.status,
+        taskStatusTo: task.status,
+        missionStatusFrom: mission.status,
+        missionStatusTo: mission.status,
+        changed: false,
+        dryRun: args.dryRun,
+      };
+    }
+    if (args.reject && task.approvalStatus === 'REJECTED') {
+      console.log(`[task-update] noop | missionId=${args.missionId} | taskId=${args.taskId} | reason=already REJECTED`);
+      return {
+        missionId: args.missionId,
+        taskId: args.taskId,
+        taskStatusFrom: task.status,
+        taskStatusTo: task.status,
+        missionStatusFrom: mission.status,
+        missionStatusTo: mission.status,
+        changed: false,
+        dryRun: args.dryRun,
+      };
+    }
+
+    const timestamp = nowIso();
+    const approved = args.approve === true;
+    const updatedTask: Task = {
+      ...task,
+      approvalStatus: approved ? 'APPROVED' : 'REJECTED',
+      approvalNote: args.approvalNote ?? null,
+      ...(approved ? {} : { status: 'SKIPPED' as TaskStatus }),
+    };
+
+    const updatedTasks = [...tasks];
+    updatedTasks[taskIndex] = updatedTask;
+
+    const newMissionStatus = deriveMissionStatus(mission.status, updatedTasks);
+
+    const updatedMission: Mission = {
+      ...mission,
+      status: newMissionStatus,
+      tasks: updatedTasks,
+      updatedAt: timestamp,
+      lastProgressAt: timestamp,
+    };
+
+    if (!args.dryRun) {
+      const commitOk = commitMissionUpdate({
+        missionsDir: args.missionsDir,
+        oldMission: mission,
+        newMission: updatedMission,
+        dryRun: args.dryRun,
+        source: 'task_approval_updated',
+        eventExtras: {
+          taskId: args.taskId,
+          approvalStatus: updatedTask.approvalStatus,
+          approvalNote: updatedTask.approvalNote ?? null,
+          statusFrom: task.status,
+          statusTo: updatedTask.status,
+          missionStatusFrom: mission.status,
+          missionStatusTo: newMissionStatus,
+          reporter: 'human',
+        },
+      });
+
+      if (!commitOk) {
+        throw new Error(`Failed to persist approval update for missionId=${args.missionId}`);
+      }
+    }
+
+    return {
+      missionId: args.missionId,
+      taskId: args.taskId,
+      taskStatusFrom: task.status,
+      taskStatusTo: updatedTask.status,
+      missionStatusFrom: mission.status,
+      missionStatusTo: newMissionStatus,
+      changed: true,
+      dryRun: args.dryRun,
+    };
+  }
+
+  // Normal status update path: idempotency + terminal checks
   if (task.status === args.status) {
     console.log(`[task-update] noop | missionId=${args.missionId} | taskId=${args.taskId} | reason=already ${args.status}`);
     return {

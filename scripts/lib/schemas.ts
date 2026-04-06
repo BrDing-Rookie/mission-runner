@@ -71,6 +71,17 @@ export const TokenUsageSchema = z.object({
   estimatedCostUsd: z.number().nonnegative().optional(),
 }).passthrough();
 
+// ==================== Guardrails ====================
+
+export const GuardrailConfigSchema = z.object({
+  maxDurationMs: z.number().positive().optional(),
+  maxRetries: z.number().nonnegative().optional(),
+  allowedFiles: z.array(z.string()).optional(),
+  deniedFiles: z.array(z.string()).optional(),
+  maxOutputTokens: z.number().positive().optional(),
+  requireArtifacts: z.array(z.string()).optional(),
+}).passthrough();
+
 // ==================== Nested Type Schemas ====================
 
 export const MissionOwnerSchema = z.object({
@@ -180,6 +191,10 @@ export const TaskSchema = z.object({
   consumes: z.array(z.string()).optional(),
   config: z.record(z.string(), z.unknown()).optional(),
   usage: TokenUsageSchema.optional(),
+  requiresApproval: z.boolean().optional(),
+  approvalStatus: z.enum(['PENDING_APPROVAL', 'APPROVED', 'REJECTED']).optional(),
+  approvalNote: z.string().nullable().optional(),
+  guardrails: GuardrailConfigSchema.optional(),
 }).passthrough();
 
 // ==================== Mission Schema ====================

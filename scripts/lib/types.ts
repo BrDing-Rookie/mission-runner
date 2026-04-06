@@ -96,6 +96,23 @@ export interface TokenUsage {
   estimatedCostUsd?: number;
 }
 
+// ==================== Guardrails ====================
+
+export interface GuardrailConfig {
+  /** 最大执行时长（毫秒） */
+  maxDurationMs?: number;
+  /** 最大重试次数（覆盖 task.maxRetries） */
+  maxRetries?: number;
+  /** 允许修改的文件/目录 glob 列表 */
+  allowedFiles?: string[];
+  /** 禁止修改的文件/目录 glob 列表 */
+  deniedFiles?: string[];
+  /** Agent 输出 token 上限 */
+  maxOutputTokens?: number;
+  /** 执行完成后必须产出的 artifact type 列表 */
+  requireArtifacts?: string[];
+}
+
 // ==================== Core Interfaces ====================
 
 export interface MissionOwner {
@@ -151,6 +168,14 @@ export interface Task {
   config?: Record<string, unknown>;
   /** LLM token 消耗统计 */
   usage?: TokenUsage;
+  /** 是否需要人工审批才能执行 */
+  requiresApproval?: boolean;
+  /** 审批状态 */
+  approvalStatus?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+  /** 审批备注 */
+  approvalNote?: string | null;
+  /** Agent 执行安全边界配置 */
+  guardrails?: GuardrailConfig;
 }
 
 export interface TaskArtifact {

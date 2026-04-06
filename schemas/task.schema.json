@@ -161,6 +161,56 @@
         "calls": { "type": "integer", "minimum": 0 },
         "estimatedCostUsd": { "type": "number", "minimum": 0 }
       }
+    },
+    "requiresApproval": {
+      "type": "boolean",
+      "description": "是否需要人工审批才能执行"
+    },
+    "approvalStatus": {
+      "type": "string",
+      "description": "审批状态",
+      "enum": ["PENDING_APPROVAL", "APPROVED", "REJECTED"]
+    },
+    "approvalNote": {
+      "type": ["string", "null"],
+      "description": "审批备注"
+    },
+    "guardrails": {
+      "type": "object",
+      "description": "Agent 执行安全边界配置",
+      "properties": {
+        "maxDurationMs": {
+          "type": "integer",
+          "description": "最大执行时长（毫秒）",
+          "minimum": 1
+        },
+        "maxRetries": {
+          "type": "integer",
+          "description": "最大重试次数",
+          "minimum": 0
+        },
+        "allowedFiles": {
+          "type": "array",
+          "description": "允许修改的文件/目录 glob 列表",
+          "items": { "type": "string" }
+        },
+        "deniedFiles": {
+          "type": "array",
+          "description": "禁止修改的文件/目录 glob 列表",
+          "items": { "type": "string" }
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "description": "Agent 输出 token 上限",
+          "minimum": 1
+        },
+        "requireArtifacts": {
+          "type": "array",
+          "description": "执行完成后必须产出的 artifact type 列表",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
     }
   }
 }
