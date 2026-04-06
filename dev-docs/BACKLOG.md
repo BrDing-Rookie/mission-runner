@@ -8,3 +8,6 @@
 | file-system | [原子文件写入](./file-system/2026-04-06-atomic-write.md) | 进行中 | 2026-04-06 |
 | state-machine | [状态迁移强制校验](./state-machine/2026-04-06-enforce-transition.md) | 进行中 | 2026-04-06 |
 | file-system | [Zod 校验收紧](./file-system/2026-04-06-zod-strict.md) | 进行中 | 2026-04-06 |
+| watchdog | [Watchdog Daemon 化](./watchdog/2026-04-06-watchdog-daemon.md) | 进行中 | 2026-04-06 |
+| orchestrator | [orchestrate --auto](./orchestrator/2026-04-06-orchestrate-auto.md) | 待开发 | 2026-04-06 |
+| reconciler | [Agent 回收增强](./reconciler/2026-04-06-reconcile-enhance.md) | 进行中 | 2026-04-06 |

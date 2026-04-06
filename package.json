@@ -25,6 +25,8 @@
     "task-add": "tsx scripts/task-add.ts",
     "watchdog": "tsx scripts/mission-watchdog.ts",
     "watchdog:dry-run": "tsx scripts/mission-watchdog.ts --dry-run",
+    "watchdog:daemon": "tsx scripts/mission-watchdog.ts --daemon",
+    "mission-orchestrate:auto": "tsx scripts/mission-orchestrate.ts --auto",
     "create-mission": "tsx scripts/mission-create.ts",
     "test:plugin-smoke": "node --import /home/ubuntu/public-deliverables/mission-runner/node_modules/tsx/dist/loader.mjs ./scripts/plugin-loader-smoke.ts"
   },

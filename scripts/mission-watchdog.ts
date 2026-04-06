@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from 'url';
-import { appendEvent, listMissionIds, readMission, writeMission } from './lib/fs-utils.ts';
+import { appendEvent, listMissionIds, readMission, safeWriteFile, writeMission } from './lib/fs-utils.ts';
 import { TERMINAL_STATUSES, DEFAULT_WATCHDOG_CONFIG } from './lib/types.ts';
 import {
   applyResultToMission,
@@ -15,8 +15,20 @@ import { runVerify } from './mission-verify.ts';
 
 // ── CLI Args ───────────────────────────────────────────────────────────────────
 
-function parseArgs(argv: string[]): ExtendedWatchdogConfig {
-  const config: ExtendedWatchdogConfig = { ...DEFAULT_WATCHDOG_CONFIG, autoVerify: false };
+interface DaemonConfig extends ExtendedWatchdogConfig {
+  daemon: boolean;
+  intervalMs: number;
+  healthFile: string | undefined;
+}
+
+function parseArgs(argv: string[]): DaemonConfig {
+  const config: DaemonConfig = {
+    ...DEFAULT_WATCHDOG_CONFIG,
+    autoVerify: false,
+    daemon: false,
+    intervalMs: 30000,
+    healthFile: undefined,
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -29,6 +41,7 @@ function parseArgs(argv: string[]): ExtendedWatchdogConfig {
       case '--dry-run': config.dryRun = true; break;
       case '--verbose': config.verbose = true; break;
       case '--auto-verify': config.autoVerify = true; break;
+      case '--daemon': config.daemon = true; break;
       case '--task-timeout-ms': {
         const value = Number(argv[index + 1]);
         if (Number.isFinite(value) && value > 0) { config.taskTimeoutMs = value; index += 1; }
@@ -42,6 +55,16 @@ function parseArgs(argv: string[]): ExtendedWatchdogConfig {
       case '--max-idle-ms': {
         const value = Number(argv[index + 1]);
         if (Number.isFinite(value) && value > 0) { config.maxIdleTimeMs = value; index += 1; }
+        break;
+      }
+      case '--interval-ms': {
+        const value = Number(argv[index + 1]);
+        if (Number.isFinite(value) && value > 0) { config.intervalMs = value; index += 1; }
+        break;
+      }
+      case '--health-file': {
+        const value = argv[index + 1];
+        if (value) { config.healthFile = value; index += 1; }
         break;
       }
       default: break;
@@ -74,10 +97,15 @@ function tryAutoVerify(config: ExtendedWatchdogConfig, mission: ReturnType<typeo
   }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
+// ── One Scan ───────────────────────────────────────────────────────────────────
 
-function main(): number {
-  const config = parseArgs(process.argv.slice(2));
+export interface ScanStats {
+  scanned: number;
+  skippedTerminal: number;
+  missing: number;
+}
+
+export function runOneScan(config: DaemonConfig): ScanStats {
   const missionIds = listMissionIds(config.missionsDir);
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
@@ -166,6 +194,73 @@ function main(): number {
     `[mission-watchdog] scan done | scanned=${scanned} | skippedTerminal=${skippedTerminal} | missing=${missing}`
   );
 
+  return { scanned, skippedTerminal, missing };
+}
+
+// ── Health File ────────────────────────────────────────────────────────────────
+
+function writeHealthFile(healthFile: string, stats: ScanStats, intervalMs: number): void {
+  const payload = JSON.stringify({
+    pid: process.pid,
+    lastScanAt: new Date().toISOString(),
+    scanned: stats.scanned,
+    skippedTerminal: stats.skippedTerminal,
+    intervalMs,
+  });
+  safeWriteFile(healthFile, payload);
+}
+
+// ── Sleep helper ───────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+
+async function main(): Promise<number> {
+  const config = parseArgs(process.argv.slice(2));
+
+  if (!config.daemon) {
+    // Single-scan mode: original behavior
+    runOneScan(config);
+    return 0;
+  }
+
+  // Daemon mode
+  let shuttingDown = false;
+
+  const shutdown = (): void => {
+    if (!shuttingDown) {
+      shuttingDown = true;
+      console.log('[mission-watchdog] shutdown signal received, finishing current scan...');
+    }
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  console.log(
+    `[mission-watchdog] daemon start | intervalMs=${config.intervalMs} | healthFile=${config.healthFile ?? 'none'}`
+  );
+
+  while (!shuttingDown) {
+    try {
+      const stats = runOneScan(config);
+
+      if (config.healthFile) {
+        writeHealthFile(config.healthFile, stats, config.intervalMs);
+      }
+    } catch (error) {
+      console.error(`[mission-watchdog] scan error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (shuttingDown) break;
+
+    await sleep(config.intervalMs);
+  }
+
+  console.log('[mission-watchdog] daemon shutdown gracefully');
   return 0;
 }
 
@@ -173,8 +268,13 @@ const isEntrypoint = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isEntrypoint) {
-  process.exitCode = main();
+  main().then((code) => { process.exitCode = code; }).catch((err) => {
+    console.error('[mission-watchdog] fatal:', err);
+    process.exitCode = 1;
+  });
 }
 
 // Re-export evaluateMission for tests and other scripts that import it
 export { evaluateMission } from './lib/mission-watchdog-evaluator.ts';
+// Re-export parseArgs for tests
+export { parseArgs };

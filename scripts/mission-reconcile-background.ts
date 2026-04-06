@@ -8,6 +8,8 @@ import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
 const TERMINAL_TASK_STATUSES = new Set(['COMPLETED', 'FAILED', 'SKIPPED']);
 const RECONCILABLE_PROCESS_STATUSES = new Set<BackgroundProcess['status']>(['COMPLETED', 'FAILED', 'TIMEOUT']);
 
+const DEFAULT_PROCESS_TIMEOUT_MS = 3_600_000; // 1 hour
+
 function summarizeProcessResult(process: BackgroundProcess): string {
   switch (process.status) {
     case 'COMPLETED':
@@ -51,6 +53,8 @@ export interface ReconcileBackgroundArgs {
   missionsDir: string;
   missionId: string;
   dryRun: boolean;
+  processTimeoutMs?: number;
+  force?: boolean;
 }
 
 export interface ReconcileBackgroundResult {
@@ -64,13 +68,48 @@ export interface ReconcileBackgroundResult {
   reconciledTaskIds: string[];
   completedTaskIds: string[];
   failedTaskIds: string[];
+  timedOutProcessIds: string[];
+  orphanProcessIds: string[];
 }
 
 export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): ReconcileBackgroundResult {
   const mission = requireMission(args);
   const timestamp = nowIso();
+  const processTimeoutMs = args.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS;
+  const force = args.force ?? false;
+  const now = Date.now();
 
-  const processesById = new Map((mission.backgroundProcesses ?? []).map((process) => [process.processId, process]));
+  const taskIds = new Set((mission.tasks ?? []).map((t) => t.taskId));
+
+  // --- Step 1: orphan detection ---
+  const orphanProcessIds: string[] = [];
+  for (const process of mission.backgroundProcesses ?? []) {
+    if (!taskIds.has(process.taskId)) {
+      orphanProcessIds.push(process.processId);
+      console.warn(
+        `[reconcile-background] orphan process detected | processId=${process.processId} | taskId=${process.taskId}`
+      );
+    }
+  }
+
+  // --- Step 2: timeout detection (mutates a working copy of backgroundProcesses) ---
+  const timedOutProcessIds: string[] = [];
+  const updatedProcesses: BackgroundProcess[] = (mission.backgroundProcesses ?? []).map((process) => {
+    if (process.status !== 'RUNNING') return process;
+
+    const startedAtMs = new Date(process.startedAt).getTime();
+    const elapsedMs = now - startedAtMs;
+
+    if (elapsedMs > processTimeoutMs || force) {
+      timedOutProcessIds.push(process.processId);
+      return { ...process, status: 'TIMEOUT' as const, endedAt: process.endedAt ?? timestamp };
+    }
+
+    return process;
+  });
+
+  // --- Step 3: existing reconcile logic (now operates on updatedProcesses) ---
+  const processesById = new Map(updatedProcesses.map((process) => [process.processId, process]));
   const completedTaskIds: string[] = [];
   const failedTaskIds: string[] = [];
   const reconciledTaskIds: string[] = [];
@@ -99,10 +138,11 @@ export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): Recon
     } satisfies Task;
   });
 
-  const finalStatus = deriveMissionStatus(mission, updatedTasks, mission.backgroundProcesses ?? []);
+  const finalStatus = deriveMissionStatus(mission, updatedTasks, updatedProcesses);
   const statusChanged = finalStatus !== mission.status;
   const tasksReconciled = reconciledTaskIds.length > 0;
-  const changed = tasksReconciled || statusChanged;
+  const processesTimedOut = timedOutProcessIds.length > 0;
+  const changed = tasksReconciled || statusChanged || processesTimedOut;
   const progressed = changed;
 
   const updatedMission: Mission = changed
@@ -110,6 +150,7 @@ export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): Recon
       ...mission,
       status: finalStatus,
       tasks: updatedTasks,
+      backgroundProcesses: updatedProcesses,
       updatedAt: timestamp,
       lastProgressAt: progressed ? timestamp : mission.lastProgressAt,
     }
@@ -128,6 +169,8 @@ export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): Recon
         reconciledTaskIds,
         completedTaskIds,
         failedTaskIds,
+        timedOutProcessIds,
+        orphanProcessIds,
       },
     });
     if (!commitOk) {
@@ -146,12 +189,39 @@ export function reconcileBackgroundMission(args: ReconcileBackgroundArgs): Recon
     reconciledTaskIds,
     completedTaskIds,
     failedTaskIds,
+    timedOutProcessIds,
+    orphanProcessIds,
   };
 }
 
 function main(): number {
   try {
-    const args = parseMissionCliArgs(process.argv.slice(2));
+    const argv = process.argv.slice(2);
+    const baseArgs = parseMissionCliArgs(argv);
+
+    let processTimeoutMs: number | undefined;
+    let force = false;
+
+    for (let i = 0; i < argv.length; i += 1) {
+      const arg = argv[i];
+      const next = argv[i + 1];
+      if (arg === '--process-timeout-ms' && next) {
+        const parsed = Number(next);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+          processTimeoutMs = parsed;
+        }
+        i += 1;
+      } else if (arg === '--force') {
+        force = true;
+      }
+    }
+
+    const args: ReconcileBackgroundArgs = {
+      ...baseArgs,
+      processTimeoutMs,
+      force,
+    };
+
     const result = reconcileBackgroundMission(args);
     console.log(JSON.stringify({
       missionId: result.missionId,
@@ -164,6 +234,8 @@ function main(): number {
       reconciledTaskIds: result.reconciledTaskIds,
       completedTaskIds: result.completedTaskIds,
       failedTaskIds: result.failedTaskIds,
+      timedOutProcessIds: result.timedOutProcessIds,
+      orphanProcessIds: result.orphanProcessIds,
     }, null, 2));
     return 0;
   } catch (error) {
