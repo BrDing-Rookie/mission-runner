@@ -11,3 +11,7 @@
 | watchdog | [Watchdog Daemon 化](./watchdog/2026-04-06-watchdog-daemon.md) | 进行中 | 2026-04-06 |
 | orchestrator | [orchestrate --auto](./orchestrator/2026-04-06-orchestrate-auto.md) | 待开发 | 2026-04-06 |
 | reconciler | [Agent 回收增强](./reconciler/2026-04-06-reconcile-enhance.md) | 进行中 | 2026-04-06 |
+| orchestrator | [人工审批节点](./orchestrator/2026-04-06-approval-node.md) | 已完成 | 2026-04-06 |
+| dispatcher | [Agent Guardrails](./dispatcher/2026-04-06-guardrails.md) | 已完成 | 2026-04-06 |
+| orchestrator | [LLM Planner](./orchestrator/2026-04-07-llm-planner.md) | 进行中 | 2026-04-07 |
+| verifier | [验证智能化](./verifier/2026-04-07-llm-verifier.md) | 进行中 | 2026-04-07 |
