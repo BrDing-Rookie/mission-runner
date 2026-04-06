@@ -4,7 +4,7 @@
  *
  * 设计决策:
  * - 所有 object schema 使用 .passthrough()，允许未知字段通过，保持向前兼容性
- * - 对于 readMission/writeMission 使用 safeParse()，失败时 warn 但不阻塞流程（降级模式）
+ * - readMission 校验失败抛出异常，writeMission 校验失败阻止写入（strict 模式）
  */
 
 import { z } from 'zod';

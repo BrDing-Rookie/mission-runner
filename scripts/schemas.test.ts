@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -246,7 +246,7 @@ test('TC5c: validateMission errors include path:message format', () => {
 
 // ==================== TC6: readMission 读取畸形数据时 warn 但仍返回 ====================
 
-test('TC6: readMission warns but still returns data for malformed mission.json', () => {
+test('TC6: readMission throws for malformed mission.json (strict mode)', () => {
   const malformed = {
     // Missing required fields: missionId, title, goal, status, createdAt, updatedAt
     someField: 'only this field',
@@ -257,26 +257,10 @@ test('TC6: readMission warns but still returns data for malformed mission.json',
   mkdirSync(missionDir, { recursive: true });
   writeFileSync(join(missionDir, 'mission.json'), JSON.stringify(malformed, null, 2), 'utf-8');
 
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
-
-  let mission: Mission | null = null;
-  try {
-    mission = readMission(missionsDir, missionId);
-  } finally {
-    console.warn = origWarn;
-  }
-
-  // Should still return data (degraded mode)
-  assert.ok(mission !== null, 'readMission should return data even for malformed input');
-  assert.equal((mission as unknown as Record<string, unknown>)['someField'], 'only this field');
-
-  // Should emit a warning
-  assert.ok(warnings.length > 0, 'Should have emitted at least one warning');
-  assert.ok(
-    warnings.some((w) => w.includes('[WARN]') && w.includes(missionId)),
-    `Warning should mention mission ID. Got: ${warnings.join(', ')}`
+  assert.throws(
+    () => readMission(missionsDir, missionId),
+    (err: Error) => err.message.includes('failed schema validation'),
+    'readMission should throw for malformed data in strict mode',
   );
 });
 
@@ -306,44 +290,45 @@ test('TC6c: readMission does not warn for valid mission data', () => {
 
 // ==================== TC7: writeMission 写入畸形数据时 warn 但仍写入 ====================
 
-test('TC7: writeMission warns but still writes for schema-invalid mission data', () => {
+test('TC7: writeMission blocks write for schema-invalid mission data (strict mode)', () => {
   const missionsDir = mkdtempSync(join(tmpdir(), 'schema-write-test-'));
 
   // Construct an object that violates the schema (invalid status)
   const invalidMission = {
     missionId: 'mission-write-invalid-001',
     title: 'Invalid Mission',
-    goal: 'Test writeMission warn behavior',
+    goal: 'Test writeMission strict behavior',
     status: 'NOT_A_REAL_STATUS' as never,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   } as Mission;
 
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
 
   let writeResult: boolean;
   try {
     writeResult = writeMission(missionsDir, invalidMission);
   } finally {
-    console.warn = origWarn;
+    console.error = origError;
   }
 
-  // Should still write (not blocked by validation failure)
-  assert.equal(writeResult, true, 'writeMission should return true even for invalid data');
+  // Should block the write (strict mode)
+  assert.equal(writeResult, false, 'writeMission should return false for invalid data');
 
-  // File should exist on disk
-  const written = JSON.parse(
-    readFileSync(join(missionsDir, invalidMission.missionId, 'mission.json'), 'utf-8')
-  ) as Record<string, unknown>;
-  assert.equal(written['status'], 'NOT_A_REAL_STATUS');
+  // File should NOT exist on disk
+  assert.equal(
+    existsSync(join(missionsDir, invalidMission.missionId, 'mission.json')),
+    false,
+    'mission.json should not have been written',
+  );
 
-  // Should emit a warning
-  assert.ok(warnings.length > 0, 'Should have emitted at least one warning');
+  // Should emit an error
+  assert.ok(errors.length > 0, 'Should have emitted at least one error');
   assert.ok(
-    warnings.some((w) => w.includes('[WARN]') && w.includes(invalidMission.missionId)),
-    `Warning should mention mission ID. Got: ${warnings.join(', ')}`
+    errors.some((e) => e.includes('[ERROR]') && e.includes(invalidMission.missionId)),
+    `Error should mention mission ID. Got: ${errors.join(', ')}`,
   );
 });
 

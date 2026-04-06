@@ -11,6 +11,7 @@ import { resolveMissionNotificationAdapter } from './mission-notification.ts';
 import type { TransitionInfo } from './mission-notification-templates.ts';
 import { buildTransitionPayload } from './mission-notification-templates.ts';
 import type { Mission, TaskStatus } from './types.ts';
+import { isTransitionAllowed } from './types.ts';
 
 export interface CommitOptions {
   missionsDir: string;
@@ -138,11 +139,26 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
     missionToWrite.flags = { ...(missionToWrite.flags ?? {}), notifiedTransitions: newFlags };
   }
 
-  // 2. 写入 mission.json（含幂等标记）
+  // 2. 校验状态迁移合法性（写入前）
+  if (oldMission.status !== newMission.status) {
+    if (!isTransitionAllowed(oldMission.status, newMission.status)) {
+      const msg = `Illegal transition: ${oldMission.status} → ${newMission.status} (source: ${source})`;
+      console.error(`[mission-commit] ${msg}`);
+      appendEvent(missionsDir, oldMission.missionId, {
+        type: 'illegal_transition_blocked',
+        from: oldMission.status,
+        to: newMission.status,
+        source,
+      });
+      return false;
+    }
+  }
+
+  // 3. 写入 mission.json（含幂等标记）
   const writeOk = writeMission(missionsDir, missionToWrite);
   if (!writeOk) return false;
 
-  // 3. 写入成功后 fire-and-forget 发送通知
+  // 4. 写入成功后 fire-and-forget 发送通知
   if (pendingNotifications.length > 0) {
     const adapter = resolveMissionNotificationAdapter();
     for (const { key, transition } of pendingNotifications) {

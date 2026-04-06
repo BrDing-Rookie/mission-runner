@@ -220,7 +220,7 @@ test('evaluateMission still returns TRIGGER_VERIFY when all tasks terminal in RU
   assert.equal(result.action, 'TRIGGER_VERIFY');
 });
 
-test('watchdog auto-verify triggers verify for RUNNING mission with all terminal tasks', async () => {
+test('watchdog auto-verify triggers verify for VERIFYING mission with all terminal tasks', async () => {
   const missionsDir = mkdtempSync(join(tmpdir(), 'watchdog-auto-verify-'));
   const missionId = 'mission-auto-verify-001';
 
@@ -228,7 +228,7 @@ test('watchdog auto-verify triggers verify for RUNNING mission with all terminal
     missionId,
     title: 'Auto verify test',
     goal: 'Test auto-verify from watchdog',
-    status: 'RUNNING',
+    status: 'VERIFYING',
     createdAt: BASE_TS,
     updatedAt: BASE_TS,
     lastProgressAt: BASE_TS,

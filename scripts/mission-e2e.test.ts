@@ -445,7 +445,7 @@ describe('Scenario 4: task failure and retry flow', () => {
 
 // ── Scenario 5: Zod schema validation ─────────────────────────────────────────
 
-describe('Scenario 5: Zod validation — malformed mission.json is tolerated with a warning', () => {
+describe('Scenario 5: Zod validation — malformed mission.json throws in strict mode', () => {
   let missionsDir: string;
   const missionId = 'mission-e2e-zod-001';
 
@@ -459,36 +459,22 @@ describe('Scenario 5: Zod validation — malformed mission.json is tolerated wit
     rmSync(missionsDir, { recursive: true, force: true });
   });
 
-  it('reads a malformed mission.json (invalid status) without throwing, but emits a warning', () => {
+  it('reads a malformed mission.json (invalid status) and throws a schema validation error', () => {
     // Write a mission.json with an invalid status value
     const malformed = {
       missionId,
       title: 'Malformed mission',
-      goal: 'Test Zod tolerance',
+      goal: 'Test Zod strict mode',
       status: 'INVALID_STATUS_XYZ',   // not in the enum
       createdAt: BASE_TS,
       updatedAt: BASE_TS,
     };
     writeFileSync(join(missionsDir, missionId, 'mission.json'), JSON.stringify(malformed, null, 2));
 
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
-
-    let result: ReturnType<typeof readMission> = null;
-    try {
-      result = readMission(missionsDir, missionId);
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    // Should NOT throw — returns the raw parsed object
-    assert.ok(result !== null, 'readMission should return an object even for invalid schema');
-    // Should have emitted at least one warning about validation failure
-    assert.ok(warnings.length > 0, 'readMission should warn when schema validation fails');
-    assert.ok(
-      warnings.some((w) => w.includes(missionId) || w.includes('validation')),
-      `Expected a validation warning mentioning the missionId, got: ${JSON.stringify(warnings)}`,
+    assert.throws(
+      () => readMission(missionsDir, missionId),
+      (err: Error) => err.message.includes('failed schema validation'),
+      'readMission should throw for invalid schema data',
     );
   });
 

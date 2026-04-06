@@ -1,15 +1,22 @@
 /**
  * 文件系统工具函数
  * 用于安全地读写 mission 工件
- *
- * TODO(Phase 2): 考虑添加文件锁机制防止并发冲突
- * TODO(Phase 3): 考虑添加与 OpenClaw runtime 的集成
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { Mission } from './types.ts';
 import { MissionSchema } from './schemas.ts';
+
+/**
+ * 原子写入文件：先写临时文件，再用 renameSync 替换目标文件
+ * rename 在同一文件系统上是 POSIX 原子操作，保证不会产生半写文件
+ */
+function atomicWriteFileSync(filePath: string, content: string): void {
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  writeFileSync(tmpPath, content, 'utf-8');
+  renameSync(tmpPath, filePath);
+}
 
 /**
  * 确保目录存在
@@ -36,7 +43,7 @@ export function listMissionIds(missionsDir: string): string[] {
 }
 
 /**
- * 读取 mission.json
+ * 读取 mission.json（strict 模式：校验失败抛出异常）
  * @param missionsDir missions 根目录
  * @param missionId mission ID
  * @returns Mission 对象或 null
@@ -56,17 +63,20 @@ export function readMission(missionsDir: string, missionId: string): Mission | n
       const errorDetails = validation.error.errors
         .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
         .join('; ');
-      console.warn(`[WARN] Mission ${missionId} failed schema validation: ${errorDetails}`);
+      throw new Error(`Mission ${missionId} failed schema validation: ${errorDetails}`);
     }
-    return parsed as Mission;
+    return validation.data as Mission;
   } catch (error) {
+    if (error instanceof Error && error.message.includes('failed schema validation')) {
+      throw error;  // Zod 校验失败向上抛出
+    }
     console.error(`[ERROR] Failed to read mission ${missionId}:`, error);
     return null;
   }
 }
 
 /**
- * 写入 mission.json
+ * 写入 mission.json（strict 模式 + 原子写入）
  * @param missionsDir missions 根目录
  * @param mission Mission 对象
  * @returns 是否成功
@@ -81,10 +91,11 @@ export function writeMission(missionsDir: string, mission: Mission): boolean {
       const errorDetails = validation.error.errors
         .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
         .join('; ');
-      console.warn(`[WARN] Mission ${mission.missionId} failed schema validation before write: ${errorDetails}`);
+      console.error(`[ERROR] Mission ${mission.missionId} schema validation failed, write blocked: ${errorDetails}`);
+      return false;
     }
     ensureDir(missionDir);
-    writeFileSync(missionPath, JSON.stringify(mission, null, 2), 'utf-8');
+    atomicWriteFileSync(missionPath, JSON.stringify(mission, null, 2));
     return true;
   } catch (error) {
     console.error(`[ERROR] Failed to write mission ${mission.missionId}:`, error);
@@ -104,13 +115,12 @@ export function updateMissionTimestamps(mission: Mission): Mission {
 }
 
 /**
- * 安全地写入文件
- * TODO(Phase 3): 考虑添加原子写入（先写临时文件再重命名）
+ * 安全地写入文件（原子写入：先写临时文件再重命名）
  */
 export function safeWriteFile(filePath: string, content: string): boolean {
   try {
     ensureDir(dirname(filePath));
-    writeFileSync(filePath, content, 'utf-8');
+    atomicWriteFileSync(filePath, content);
     return true;
   } catch (error) {
     console.error(`[ERROR] Failed to write file ${filePath}:`, error);
