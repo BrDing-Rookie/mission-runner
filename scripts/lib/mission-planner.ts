@@ -3,10 +3,14 @@
  *
  * Extracted from mission-plan.ts: template resolution, task normalization,
  * completion criteria, parallel task building, and plan output construction.
+ * Includes LLM-driven task planning via buildPlannedOutputWithLlm.
  */
 
 import { readFileSync } from 'fs';
 import type { CompletionCriterion, Mission, Task, TaskType } from './types.ts';
+import type { LlmClient } from './llm-client.ts';
+import { TaskSchema, CompletionCriterionSchema } from './schemas.ts';
+import { z } from 'zod';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -393,7 +397,198 @@ export function buildPlannedOutput(
     },
   ]);
 
-  const planMarkdown = [
+  const planMarkdown = buildPlanMarkdown(mission, tasks, criteria);
+
+  return {
+    completionCriteria: criteria,
+    tasks,
+    planMarkdown,
+  };
+}
+
+// ── LLM Prompt Construction ───────────────────────────────────────────────────
+
+const VALID_TASK_TYPES: TaskType[] = [
+  'research',
+  'analysis',
+  'code',
+  'document',
+  'review',
+  'test',
+  'deploy',
+  'verification',
+  'notification',
+  'external_wait',
+];
+
+export function buildLlmSystemPrompt(): string {
+  return `You are an expert task planner. Your job is to decompose a mission goal into a concrete, executable sequence of tasks.
+
+Rules:
+- Output ONLY valid JSON — no markdown code fences, no explanations, no preamble
+- Each task must have: taskId (string, e.g. "T1-research"), title (string), type (one of: ${VALID_TASK_TYPES.join(', ')}), description (string), dependsOn (array of taskId strings, can be empty)
+- completionCriteria must have: id (string, e.g. "criterion-1"), description (string), required (boolean)
+- dependsOn must only reference taskIds defined in the same tasks array
+- Tasks should form an acyclic dependency graph
+- Typically 3–6 tasks is appropriate; avoid excessive granularity
+
+Output format (pure JSON, no fences):
+{
+  "tasks": [
+    { "taskId": "T1-xxx", "title": "...", "type": "research", "description": "...", "dependsOn": [] },
+    { "taskId": "T2-xxx", "title": "...", "type": "code", "description": "...", "dependsOn": ["T1-xxx"] }
+  ],
+  "completionCriteria": [
+    { "id": "criterion-1", "description": "...", "required": true },
+    { "id": "criterion-2", "description": "...", "required": true }
+  ]
+}`;
+}
+
+export function buildLlmUserPrompt(mission: Mission): string {
+  return `Decompose the following mission into tasks and completion criteria.
+
+Mission title: ${mission.title}
+Mission goal: ${mission.goal}
+
+Return ONLY the JSON object described in the system prompt. No markdown, no explanation.`;
+}
+
+// ── LLM-Driven Plan Building ───────────────────────────────────────────────────
+
+/**
+ * Build a PlannedOutput using an LLM client.
+ *
+ * Throws if:
+ * - The LLM call fails
+ * - The response is not valid JSON
+ * - The parsed tasks fail TaskSchema validation
+ * - The parsed completionCriteria fail CompletionCriterionSchema validation
+ *
+ * The caller is responsible for catching and falling back to buildPlannedOutput().
+ */
+export async function buildPlannedOutputWithLlm(
+  mission: Mission,
+  llmClient: LlmClient
+): Promise<PlannedOutput & { llmUsage: { model: string; inputTokens: number; outputTokens: number } }> {
+  const systemPrompt = buildLlmSystemPrompt();
+  const userPrompt = buildLlmUserPrompt(mission);
+
+  const response = await llmClient.complete(systemPrompt, userPrompt);
+
+  // Strip markdown code fences if present (defensive)
+  const rawContent = response.content.trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawContent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`LLM returned invalid JSON: ${message}`);
+  }
+
+  // Validate structure
+  const LlmOutputSchema = z.object({
+    tasks: z.array(z.unknown()),
+    completionCriteria: z.array(z.unknown()),
+  });
+
+  const structureResult = LlmOutputSchema.safeParse(parsed);
+  if (!structureResult.success) {
+    const issues = structureResult.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ');
+    throw new Error(`LLM output missing required fields: ${issues}`);
+  }
+
+  // Validate each task with TaskSchema
+  const taskResults = structureResult.data.tasks.map((rawTask, index) => {
+    const taskWithDefaults = {
+      status: 'READY',
+      retryCount: 0,
+      maxRetries: 2,
+      artifacts: [],
+      resultSummary: null,
+      lastError: null,
+      backgroundProcessId: null,
+      sessionKey: null,
+      agent: null,
+      ...(rawTask as Record<string, unknown>),
+    };
+
+    const result = TaskSchema.safeParse(taskWithDefaults);
+    if (!result.success) {
+      const issues = result.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ');
+      throw new Error(`LLM task at index ${index} failed validation: ${issues}`);
+    }
+    return result.data;
+  });
+
+  // Validate each criterion
+  const criteriaResults = structureResult.data.completionCriteria.map((rawCriterion, index) => {
+    const result = CompletionCriterionSchema.safeParse(rawCriterion);
+    if (!result.success) {
+      const issues = result.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ');
+      throw new Error(`LLM completionCriteria at index ${index} failed validation: ${issues}`);
+    }
+    return result.data;
+  });
+
+  if (taskResults.length === 0) {
+    throw new Error('LLM returned empty tasks array');
+  }
+
+  if (criteriaResults.length === 0) {
+    throw new Error('LLM returned empty completionCriteria array');
+  }
+
+  // Normalize tasks: set status based on dependsOn, fill in defaults
+  const tasks: Task[] = taskResults.map((task) => ({
+    ...task,
+    status: (task.dependsOn && task.dependsOn.length > 0) ? 'PENDING' : 'READY',
+    priority: task.priority ?? 100,
+    retryCount: task.retryCount ?? 0,
+    maxRetries: task.maxRetries ?? 2,
+    artifacts: task.artifacts ?? [],
+    resultSummary: task.resultSummary ?? null,
+    lastError: task.lastError ?? null,
+    backgroundProcessId: task.backgroundProcessId ?? null,
+    sessionKey: task.sessionKey ?? null,
+    agent: task.agent ?? null,
+  } as Task));
+
+  // Validate the task dependency graph (acyclic)
+  assertAcyclicTaskGraph(tasks);
+
+  const criteria: CompletionCriterion[] = criteriaResults.map((c) => ({
+    ...c,
+    verified: c.verified ?? false,
+  } as CompletionCriterion));
+
+  const planMarkdown = buildPlanMarkdown(mission, tasks, criteria, true);
+
+  return {
+    completionCriteria: criteria,
+    tasks,
+    planMarkdown,
+    llmUsage: {
+      model: response.model,
+      inputTokens: response.inputTokens,
+      outputTokens: response.outputTokens,
+    },
+  };
+}
+
+// ── Plan Markdown Builder ──────────────────────────────────────────────────────
+
+function buildPlanMarkdown(
+  mission: Mission,
+  tasks: Task[],
+  criteria: CompletionCriterion[],
+  llmGenerated = false
+): string {
+  return [
     `# Plan for ${mission.missionId}`,
     '',
     '## Mission',
@@ -412,14 +607,10 @@ export function buildPlannedOutput(
     }),
     '',
     '## Notes',
-    '- 此 planner 为 MVP 规则型实现，用于优先跑通 create -> plan -> dispatch -> watchdog -> verify 主流程。',
+    llmGenerated
+      ? '- 此 plan 由 LLM 生成。'
+      : '- 此 planner 为 MVP 规则型实现，用于优先跑通 create -> plan -> dispatch -> watchdog -> verify 主流程。',
     '- 后续可替换为基于模型的 planner，但保持 mission.json 与 plan.md 输出契约不变。',
     '',
   ].join('\n');
-
-  return {
-    completionCriteria: criteria,
-    tasks,
-    planMarkdown,
-  };
 }

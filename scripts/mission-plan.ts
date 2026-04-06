@@ -8,10 +8,13 @@ import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { derivePhaseFromTask } from './lib/mission-helpers.ts';
 import {
   buildPlannedOutput,
+  buildPlannedOutputWithLlm,
   normalizeCustomTasks,
   parseCustomCriteria,
   parseCustomTasks,
+  type PlannedOutput,
 } from './lib/mission-planner.ts';
+import { createLlmClient } from './lib/llm-client.ts';
 import type { Mission } from './lib/types.ts';
 
 // ── CLI Args ───────────────────────────────────────────────────────────────────
@@ -26,6 +29,7 @@ interface PlanArgs {
   criteriaJson: string | null;
   parallel: number | null;
   template: string | null;
+  useLlm: boolean;
 }
 
 function parseArgs(argv: string[]): PlanArgs {
@@ -39,6 +43,7 @@ function parseArgs(argv: string[]): PlanArgs {
     criteriaJson: null,
     parallel: null,
     template: null,
+    useLlm: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -75,6 +80,9 @@ function parseArgs(argv: string[]): PlanArgs {
       case '--template':
         if (next) { args.template = next; index += 1; }
         break;
+      case '--use-llm':
+        args.useLlm = true;
+        break;
       default:
         break;
     }
@@ -98,7 +106,122 @@ function assertRequired(args: PlanArgs): void {
   }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
+// ── Core execution (shared between sync and async paths) ───────────────────────
+
+function buildRuleBasedOutput(args: PlanArgs, mission: Mission): PlannedOutput {
+  const customTaskInput = parseCustomTasks({
+    tasksJson: args.tasksJson,
+    tasksFile: args.tasksFile,
+    template: args.template,
+  });
+  const customTasks = customTaskInput ? normalizeCustomTasks(customTaskInput) : null;
+  const customCriteria = parseCustomCriteria({
+    criteriaJson: args.criteriaJson,
+    criteriaFile: args.criteriaFile,
+  });
+  return buildPlannedOutput(mission, customTasks, customCriteria, args.parallel);
+}
+
+function applyOutputToMission(
+  args: PlanArgs,
+  mission: Mission,
+  output: PlannedOutput,
+  llmUsage: { model: string; inputTokens: number; outputTokens: number } | null
+): { updatedMission: Mission; planPath: string; agentsDiscovered: number } {
+  const agents = discoverAgents({
+    channel: mission.owner?.channel ?? '',
+    chatId: mission.owner?.chatId ?? '',
+  });
+  for (const task of output.tasks) {
+    task.phase = derivePhaseFromTask(task);
+    const matched = matchAgentForTask(task, agents);
+    if (matched) {
+      task.agent = matched.agentId;
+      task.config = { ...task.config, agentMentionTag: matched.mentionTag, agentName: matched.name };
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const nextWakeAt = mission.nextWakeAt ?? nowIso;
+  const existingMetadata = mission.metadata ?? {};
+
+  const updatedMission: Mission = {
+    ...mission,
+    status: 'PLANNED',
+    updatedAt: nowIso,
+    lastProgressAt: nowIso,
+    nextWakeAt,
+    completionCriteria: output.completionCriteria,
+    tasks: output.tasks,
+    artifacts: [
+      ...(mission.artifacts ?? []).filter((artifact) => artifact.path !== 'plan.md'),
+      {
+        path: 'plan.md',
+        type: 'document',
+        description: 'Planner 生成的任务拆解与完成标准。',
+        generatedAt: nowIso,
+      },
+    ],
+    metadata: {
+      ...existingMetadata,
+      ...(llmUsage ? {
+        llmPlannerUsage: {
+          model: llmUsage.model,
+          inputTokens: llmUsage.inputTokens,
+          outputTokens: llmUsage.outputTokens,
+          usedAt: nowIso,
+        },
+      } : {}),
+    },
+  };
+
+  const missionDir = join(args.missionsDir, mission.missionId);
+  const planPath = join(missionDir, 'plan.md');
+
+  return { updatedMission, planPath, agentsDiscovered: agents.length };
+}
+
+function commitOutput(
+  args: PlanArgs,
+  mission: Mission,
+  output: PlannedOutput,
+  updatedMission: Mission,
+  planPath: string,
+  llmUsage: { model: string; inputTokens: number; outputTokens: number } | null,
+  agentsDiscovered: number
+): number {
+  if (args.dryRun) {
+    console.log(JSON.stringify({ missionId: mission.missionId, output, updatedMission, planPath }, null, 2));
+    return 0;
+  }
+
+  const commitOk = commitMissionUpdate({
+    missionsDir: args.missionsDir,
+    oldMission: mission,
+    newMission: updatedMission,
+    dryRun: args.dryRun,
+    source: 'planned',
+    eventExtras: {
+      taskCount: output.tasks.length,
+      completionCriteriaCount: output.completionCriteria.length,
+      artifactPath: 'plan.md',
+      agentsDiscovered,
+      ...(llmUsage ? { llmUsed: true, llmModel: llmUsage.model } : { llmUsed: false }),
+    },
+    artifactWrites: [{ path: planPath, content: output.planMarkdown }],
+  });
+
+  if (!commitOk) {
+    console.error(`[mission-plan] failed | missionId=${mission.missionId}`);
+    return 1;
+  }
+
+  console.log(`[mission-plan] planned | missionId=${mission.missionId} | tasks=${output.tasks.length} | criteria=${output.completionCriteria.length}`);
+  console.log(planPath);
+  return 0;
+}
+
+// ── Sync main (backward-compatible, no LLM support) ───────────────────────────
 
 export function main(argv: string[] = process.argv.slice(2)): number {
   try {
@@ -110,87 +233,9 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       throw new Error(`Mission not found: ${args.missionId}`);
     }
 
-    const customTaskInput = parseCustomTasks({
-      tasksJson: args.tasksJson,
-      tasksFile: args.tasksFile,
-      template: args.template,
-    });
-    const customTasks = customTaskInput ? normalizeCustomTasks(customTaskInput) : null;
-    const customCriteria = parseCustomCriteria({
-      criteriaJson: args.criteriaJson,
-      criteriaFile: args.criteriaFile,
-    });
-    const output = buildPlannedOutput(mission, customTasks, customCriteria, args.parallel);
-
-    // Agent 发现 + 分配
-    const agents = discoverAgents({
-      channel: mission.owner?.channel ?? '',
-      chatId: mission.owner?.chatId ?? '',
-    });
-    for (const task of output.tasks) {
-      task.phase = derivePhaseFromTask(task);
-      const matched = matchAgentForTask(task, agents);
-      if (matched) {
-        task.agent = matched.agentId;
-        task.config = { ...task.config, agentMentionTag: matched.mentionTag, agentName: matched.name };
-      }
-    }
-
-    const nowIso = new Date().toISOString();
-    const nextWakeAt = mission.nextWakeAt ?? nowIso;
-    const existingMetadata = mission.metadata ?? {};
-
-    const updatedMission: Mission = {
-      ...mission,
-      status: 'PLANNED',
-      updatedAt: nowIso,
-      lastProgressAt: nowIso,
-      nextWakeAt,
-      completionCriteria: output.completionCriteria,
-      tasks: output.tasks,
-      artifacts: [
-        ...(mission.artifacts ?? []).filter((artifact) => artifact.path !== 'plan.md'),
-        {
-          path: 'plan.md',
-          type: 'document',
-          description: 'Planner 生成的任务拆解与完成标准。',
-          generatedAt: nowIso,
-        },
-      ],
-      metadata: { ...existingMetadata },
-    };
-
-    const missionDir = join(args.missionsDir, mission.missionId);
-    const planPath = join(missionDir, 'plan.md');
-
-    if (args.dryRun) {
-      console.log(JSON.stringify({ missionId: mission.missionId, output, updatedMission, planPath }, null, 2));
-      return 0;
-    }
-
-    const commitOk = commitMissionUpdate({
-      missionsDir: args.missionsDir,
-      oldMission: mission,
-      newMission: updatedMission,
-      dryRun: args.dryRun,
-      source: 'planned',
-      eventExtras: {
-        taskCount: output.tasks.length,
-        completionCriteriaCount: output.completionCriteria.length,
-        artifactPath: 'plan.md',
-        agentsDiscovered: agents.length,
-      },
-      artifactWrites: [{ path: planPath, content: output.planMarkdown }],
-    });
-
-    if (!commitOk) {
-      console.error(`[mission-plan] failed | missionId=${mission.missionId}`);
-      return 1;
-    }
-
-    console.log(`[mission-plan] planned | missionId=${mission.missionId} | tasks=${output.tasks.length} | criteria=${output.completionCriteria.length}`);
-    console.log(planPath);
-    return 0;
+    const output = buildRuleBasedOutput(args, mission);
+    const { updatedMission, planPath, agentsDiscovered } = applyOutputToMission(args, mission, output, null);
+    return commitOutput(args, mission, output, updatedMission, planPath, null, agentsDiscovered);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[mission-plan] error | ${message}`);
@@ -198,9 +243,65 @@ export function main(argv: string[] = process.argv.slice(2)): number {
   }
 }
 
+// ── Async main (supports --use-llm flag) ──────────────────────────────────────
+
+export async function mainAsync(argv: string[] = process.argv.slice(2)): Promise<number> {
+  try {
+    const args = parseArgs(argv);
+    assertRequired(args);
+
+    const mission = readMission(args.missionsDir, args.missionId);
+    if (!mission) {
+      throw new Error(`Mission not found: ${args.missionId}`);
+    }
+
+    let output: PlannedOutput;
+    let llmUsage: { model: string; inputTokens: number; outputTokens: number } | null = null;
+
+    if (args.useLlm && !args.tasksJson && !args.tasksFile && args.parallel === null && !args.template) {
+      const llmClient = createLlmClient();
+      if (llmClient) {
+        try {
+          const llmResult = await buildPlannedOutputWithLlm(mission, llmClient);
+          llmUsage = llmResult.llmUsage;
+          output = llmResult;
+          console.log(`[mission-plan] llm-planner | model=${llmUsage.model} | inputTokens=${llmUsage.inputTokens} | outputTokens=${llmUsage.outputTokens}`);
+        } catch (llmError) {
+          const llmMessage = llmError instanceof Error ? llmError.message : String(llmError);
+          console.warn(`[mission-plan] llm-planner failed, falling back to rule-based | ${llmMessage}`);
+          output = buildRuleBasedOutput(args, mission);
+        }
+      } else {
+        console.warn('[mission-plan] --use-llm specified but ANTHROPIC_API_KEY not set, falling back to rule-based planner');
+        output = buildRuleBasedOutput(args, mission);
+      }
+    } else {
+      if (args.useLlm) {
+        console.info('[mission-plan] --use-llm ignored because custom tasks/template/parallel are specified');
+      }
+      output = buildRuleBasedOutput(args, mission);
+    }
+
+    const { updatedMission, planPath, agentsDiscovered } = applyOutputToMission(args, mission, output, llmUsage);
+    return commitOutput(args, mission, output, updatedMission, planPath, llmUsage, agentsDiscovered);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[mission-plan] error | ${message}`);
+    return 1;
+  }
+}
+
+// ── Entrypoint ─────────────────────────────────────────────────────────────────
+
 const isEntrypoint = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isEntrypoint) {
-  process.exitCode = main();
+  const argv = process.argv.slice(2);
+  const useLlm = argv.includes('--use-llm');
+  if (useLlm) {
+    process.exitCode = await mainAsync(argv);
+  } else {
+    process.exitCode = main(argv);
+  }
 }

@@ -4,6 +4,7 @@
  * Extracted from mission-verify.ts: plan criteria extraction, artifact
  * file listing, criterion evaluation, and verification result computation.
  * Includes structuralVerify for automated checks (tests, artifacts, file existence).
+ * Includes LLM-powered criterion evaluation via evaluateCriterionWithLlm.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -11,6 +12,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CompletionCriterion, Mission, MissionStatus, VerificationStatus } from './types.ts';
 import { loadTextIfExists, missionPath, setMissionStatus, setVerification, upsertArtifact } from './mission-helpers.ts';
+import type { LlmClient } from './llm-client.ts';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -156,6 +158,131 @@ export function evaluateCriterion(criterion: CompletionCriterion, context: {
     passed: reasons.length === 0,
     reason: reasons.length === 0 ? 'Satisfied by current mission state under enhanced verification rules.' : reasons.join('; '),
   };
+}
+
+// ── LLM-Powered Criterion Evaluation ─────────────────────────────────────────
+
+/**
+ * Build a compact mission context summary for LLM consumption.
+ * Only includes key facts — not the full mission JSON.
+ */
+function buildMissionContextSummary(context: {
+  hasPlan: boolean;
+  hasArtifacts: boolean;
+  hasPendingTasks: boolean;
+  hasFailedTasks: boolean;
+  planCriteria: string[];
+  artifactFiles: string[];
+  missionArtifacts: string[];
+  missionId: string;
+  taskSummary?: string;
+}): string {
+  const lines: string[] = [
+    `Mission ID: ${context.missionId}`,
+    `Plan present: ${context.hasPlan}`,
+    `Has artifacts (non-meta): ${context.hasArtifacts}`,
+    `Has pending (non-terminal) tasks: ${context.hasPendingTasks}`,
+    `Has failed tasks: ${context.hasFailedTasks}`,
+  ];
+
+  if (context.planCriteria.length > 0) {
+    lines.push(`Plan-defined criteria (${context.planCriteria.length}): ${context.planCriteria.slice(0, 5).join(' | ')}`);
+  }
+
+  if (context.missionArtifacts.length > 0) {
+    lines.push(`Registered artifacts: ${context.missionArtifacts.slice(0, 10).join(', ')}`);
+  }
+
+  if (context.artifactFiles.length > 0) {
+    lines.push(`Artifact files on disk (${context.artifactFiles.length}): ${context.artifactFiles.slice(0, 5).join(', ')}`);
+  }
+
+  if (context.taskSummary) {
+    lines.push(`Task summary: ${context.taskSummary}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Evaluate a single completion criterion using an LLM.
+ * Falls back to heuristic evaluateCriterion on LLM failure or invalid response.
+ */
+export async function evaluateCriterionWithLlm(
+  criterion: CompletionCriterion,
+  context: {
+    hasPlan: boolean;
+    hasArtifacts: boolean;
+    hasPendingTasks: boolean;
+    hasFailedTasks: boolean;
+    planCriteria: string[];
+    artifactFiles: string[];
+    missionArtifacts: string[];
+    missionsDir: string;
+    missionId: string;
+    taskSummary?: string;
+  },
+  llmClient: LlmClient,
+): Promise<CriterionResult> {
+  // Short-circuit: already verified
+  if (criterion.verified === true) {
+    return { criterionId: criterion.id, passed: true, reason: 'Criterion already explicitly marked verified=true.' };
+  }
+
+  const systemPrompt = `You are a mission completion evaluator. Given a completion criterion and the current mission state, determine if the criterion is satisfied.
+
+Respond with ONLY a JSON object (no markdown, no code fences) in this exact format:
+{"passed": true, "reason": "brief explanation"}
+or
+{"passed": false, "reason": "brief explanation of what is missing"}
+
+Be concise. The reason should be 1-2 sentences maximum.`;
+
+  const missionContext = buildMissionContextSummary(context);
+
+  const userPrompt = `Criterion ID: ${criterion.id}
+Criterion description: ${criterion.description}
+Required: ${criterion.required ?? true}
+
+Current mission state:
+${missionContext}
+
+Evaluate whether this criterion is satisfied based on the mission state above. Respond with JSON only.`;
+
+  try {
+    const response = await llmClient.complete(systemPrompt, userPrompt);
+    const content = response.content.trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+
+    // Parse JSON response
+    let parsed: { passed?: unknown; reason?: unknown };
+    try {
+      parsed = JSON.parse(content) as { passed?: unknown; reason?: unknown };
+    } catch {
+      // Invalid JSON — fall back to heuristic
+      console.warn(`[evaluateCriterionWithLlm] Invalid JSON response for criterion ${criterion.id}, falling back to heuristic`);
+      return evaluateCriterion(criterion, context);
+    }
+
+    // Validate response shape
+    if (typeof parsed.passed !== 'boolean' || typeof parsed.reason !== 'string') {
+      console.warn(`[evaluateCriterionWithLlm] Unexpected response shape for criterion ${criterion.id}, falling back to heuristic`);
+      return evaluateCriterion(criterion, context);
+    }
+
+    return {
+      criterionId: criterion.id,
+      passed: parsed.passed,
+      reason: `[LLM] ${parsed.reason}`,
+    };
+  } catch (err) {
+    // LLM call failed — graceful fallback
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[evaluateCriterionWithLlm] LLM call failed for criterion ${criterion.id}: ${message}, falling back to heuristic`);
+    return evaluateCriterion(criterion, context);
+  }
 }
 
 // ── Verification Markdown ──────────────────────────────────────────────────────
@@ -458,6 +585,150 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
     : iterationLimitReached
       ? `Verification failed permanently: iteration limit ${maxIterations} reached with ${gaps.length} unresolved gap(s).`
       : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria.`;
+
+  // ── Structural verification ───────────────────────────────────────────────
+  const structuralChecks = structuralVerify(args.missionsDir, mission);
+
+  const now = new Date().toISOString();
+  const verificationFile = missionPath(args.missionsDir, mission.missionId, 'verification.md');
+
+  const verificationMarkdown = buildVerificationMarkdown(
+    mission, verificationStatus, verificationSummary,
+    criterionResults, completionCriteria, planCriteria, artifactFiles, gaps,
+    currentIteration, maxIterations, completedTasks, tasks.length,
+    structuralChecks,
+  );
+
+  // In auto-only mode, don't change mission status
+  if (args.autoOnly) {
+    return {
+      mission,
+      verificationStatus,
+      missionStatus: mission.status,
+      gaps,
+      criteriaResults: criterionResults,
+      structuralChecks,
+      verificationMarkdown,
+      verificationFile,
+      updatedMission: mission,
+    };
+  }
+
+  const newMissionStatus: MissionStatus = verificationStatus === 'PASS'
+    ? 'COMPLETED'
+    : verificationStatus === 'NONRETRYABLE_FAILURE'
+      ? 'FAILED'
+      : 'ITERATING';
+
+  const verifiedMission = setVerification(mission, { status: verificationStatus, summary: verificationSummary, gaps, criteriaResults: criterionResults });
+  const updatedMission = {
+    ...setMissionStatus(verifiedMission, newMissionStatus),
+    artifacts: upsertArtifact(verifiedMission.artifacts, { path: `missions/${mission.missionId}/verification.md`, type: 'summary' as const, description: 'Verification result summary', generatedAt: now }),
+    nextWakeAt: verificationStatus === 'PASS' || verificationStatus === 'NONRETRYABLE_FAILURE' ? null : now,
+    currentIteration: verificationStatus === 'RETRYABLE_GAP' ? currentIteration + 1 : currentIteration,
+  };
+
+  return {
+    mission,
+    verificationStatus,
+    missionStatus: newMissionStatus,
+    gaps,
+    criteriaResults: criterionResults,
+    structuralChecks,
+    verificationMarkdown,
+    verificationFile,
+    updatedMission,
+  };
+}
+
+// ── LLM-Powered Compute Verification ─────────────────────────────────────────
+
+/**
+ * Like computeVerification but evaluates each criterion using the LLM.
+ * Runs criterion evaluations serially to avoid concurrency complexity.
+ * Returns Promise<VerifyComputed>.
+ */
+export async function computeVerificationWithLlm(
+  args: VerifyInput,
+  mission: Mission,
+  llmClient: LlmClient,
+): Promise<VerifyComputed> {
+  const tasks = mission.tasks ?? [];
+  const completedTasks = tasks.filter((task) => task.status === 'COMPLETED').length;
+  const failedTasks = tasks.filter((task) => task.status === 'FAILED');
+  const pendingTasks = tasks.filter((task) => !['COMPLETED', 'FAILED', 'SKIPPED'].includes(task.status));
+  const planText = loadTextIfExists(missionPath(args.missionsDir, mission.missionId, 'plan.md'));
+  const completionCriteria = mission.completionCriteria ?? [];
+  const missionArtifacts = mission.artifacts ?? [];
+  const nonMetaArtifacts = missionArtifacts.filter((a) => !a.path.endsWith('/plan.md') && a.path !== 'plan.md' && !a.path.endsWith('/verification.md') && a.path !== 'verification.md');
+  const gaps: string[] = [];
+
+  const planCriteria = planText ? extractPlanCriteria(planText) : [];
+  const artifactFiles = listArtifactFiles(args.missionsDir, mission.missionId);
+
+  if (!planText) gaps.push('Missing plan.md artifact.');
+  if (tasks.length === 0) gaps.push('Mission has no planned tasks.');
+  if (pendingTasks.length > 0) gaps.push(`Pending non-terminal tasks: ${pendingTasks.map((task) => `${task.taskId}:${task.status}`).join(', ')}`);
+  if (failedTasks.length > 0) gaps.push(`Failed tasks present: ${failedTasks.map((task) => task.taskId).join(', ')}`);
+
+  // Build task summary for LLM context
+  const taskSummary = tasks.length > 0
+    ? tasks.map((t) => `${t.taskId}:${t.status}`).join(', ')
+    : 'no tasks';
+
+  // Build shared criterion context
+  const criterionContext = {
+    hasPlan: Boolean(planText),
+    hasArtifacts: nonMetaArtifacts.length > 0,
+    hasPendingTasks: pendingTasks.length > 0,
+    hasFailedTasks: failedTasks.length > 0,
+    planCriteria,
+    artifactFiles,
+    missionArtifacts: missionArtifacts.map((a) => a.path),
+    missionsDir: args.missionsDir,
+    missionId: mission.missionId,
+    taskSummary,
+  };
+
+  // Evaluate criteria serially with LLM
+  const criterionResults: CriterionResult[] = [];
+  for (const criterion of completionCriteria) {
+    const result = await evaluateCriterionWithLlm(criterion, criterionContext, llmClient);
+    criterionResults.push(result);
+  }
+
+  for (const criterion of completionCriteria) {
+    if (criterion.required === false) continue;
+    const result = criterionResults.find((item) => item.criterionId === criterion.id);
+    if (result && !result.passed) {
+      gaps.push(`Completion criterion ${criterion.id} not satisfied: ${result.reason}`);
+    }
+  }
+
+  if (planCriteria.length > completionCriteria.length) {
+    gaps.push(`Plan.md defines ${planCriteria.length} completion criteria but mission has only ${completionCriteria.length}; consider updating mission completionCriteria.`);
+  }
+
+  const currentIteration = mission.currentIteration ?? 0;
+  const maxIterations = mission.maxIterations ?? Number.MAX_SAFE_INTEGER;
+  const iterationLimitReached = gaps.length > 0 && currentIteration >= maxIterations;
+
+  const verificationStatus: VerificationStatus = gaps.length === 0
+    ? 'PASS'
+    : iterationLimitReached
+      ? 'NONRETRYABLE_FAILURE'
+      : 'RETRYABLE_GAP';
+
+  if (iterationLimitReached) {
+    gaps.push(`Max iterations reached (${currentIteration}/${maxIterations}); mission cannot retry further.`);
+  }
+
+  const criteriaPassed = criterionResults.filter((r) => r.passed).length;
+  const verificationSummary = gaps.length === 0
+    ? `Verification passed with ${completedTasks}/${tasks.length} tasks completed and ${criteriaPassed}/${completionCriteria.length} completion criteria satisfied (LLM-evaluated).`
+    : iterationLimitReached
+      ? `Verification failed permanently: iteration limit ${maxIterations} reached with ${gaps.length} unresolved gap(s).`
+      : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria (LLM-evaluated).`;
 
   // ── Structural verification ───────────────────────────────────────────────
   const structuralChecks = structuralVerify(args.missionsDir, mission);

@@ -64,37 +64,44 @@ export class AnthropicLlmClient implements LlmClient {
 
   async complete(systemPrompt: string, userPrompt: string): Promise<LlmResponse> {
     const messages: AnthropicMessage[] = [{ role: 'user', content: userPrompt }];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': API_VERSION,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: this.maxTokens,
-        temperature: this.temperature,
-        system: systemPrompt,
-        messages,
-      }),
-    });
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': API_VERSION,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          max_tokens: this.maxTokens,
+          temperature: this.temperature,
+          system: systemPrompt,
+          messages,
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${errorBody}`);
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Anthropic API error ${response.status}: ${errorBody}`);
+      }
+
+      const data = (await response.json()) as AnthropicResponse;
+      const textBlock = data.content.find((c) => c.type === 'text');
+
+      return {
+        content: textBlock?.text ?? '',
+        model: data.model,
+        inputTokens: data.usage.input_tokens,
+        outputTokens: data.usage.output_tokens,
+      };
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const data = (await response.json()) as AnthropicResponse;
-    const textBlock = data.content.find((c) => c.type === 'text');
-
-    return {
-      content: textBlock?.text ?? '',
-      model: data.model,
-      inputTokens: data.usage.input_tokens,
-      outputTokens: data.usage.output_tokens,
-    };
   }
 }
 
