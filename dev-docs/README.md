@@ -4,11 +4,19 @@
 
 将 Mission Runner 从「手动挡 MVP」推进为「自动闭环的完整编排系统」。
 
-当前阶段: **Phase 2 — 闭环可靠性**
+当前阶段: **Phase 2 — 闭环可靠性**（Phase 1 已完成）
 
-核心目标：
+Phase 1 已完成:
+- VERIFYING 状态 task-add 修复 + 状态回退
+- Zod 运行时校验接入（warn 降级模式）
+- E2E 集成测试补充（170 测试通过）
+- P0 安全修复 + P1/P2 代码审查修复
+- dispatch 消息回调 + watchdog 停滞检测
+- verify 自动/手动模式拆分
+
+Phase 2 核心目标：
 - 并发安全（原子写入 + 文件锁）
-- Zod 校验收紧
+- Zod 校验收紧（warn → strict）
 - 状态迁移强制校验
 - Agent 结果自动回收
 - Watchdog daemon 化

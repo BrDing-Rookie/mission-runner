@@ -3,7 +3,7 @@
  * 用于安全地读写 mission 工件
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { Mission } from './types.ts';
 import { MissionSchema } from './schemas.ts';
@@ -170,4 +170,103 @@ export function initMissionDirectory(missionsDir: string, missionId: string): vo
   const missionDir = join(missionsDir, missionId);
   ensureDir(missionDir);
   ensureDir(join(missionDir, 'artifacts'));
+}
+
+// ==================== 文件锁机制 ====================
+
+const LOCK_TIMEOUT_MS = 10_000;   // 锁超时 10 秒
+const LOCK_RETRY_INTERVAL_MS = 50; // 重试间隔 50ms
+
+export interface LockHandle {
+  lockDir: string;
+  release: () => void;
+}
+
+/**
+ * 获取 mission 级文件锁（基于 mkdirSync 原子性）
+ * @param missionsDir missions 根目录
+ * @param missionId mission ID
+ * @returns LockHandle 或 null（超时获取失败）
+ */
+export function acquireMissionLock(missionsDir: string, missionId: string): LockHandle | null {
+  const lockDir = join(missionsDir, missionId, '.lock');
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(lockDir);
+      // 锁获取成功，写入 holder 信息用于调试和 stale lock 检测
+      const holderFile = join(lockDir, 'holder.json');
+      writeFileSync(
+        holderFile,
+        JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
+        'utf-8',
+      );
+      return {
+        lockDir,
+        release: () => {
+          try {
+            const hp = join(lockDir, 'holder.json');
+            if (existsSync(hp)) unlinkSync(hp);
+            rmdirSync(lockDir);
+          } catch {
+            // best-effort release
+          }
+        },
+      };
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // 锁已被持有，检查是否为过期锁（stale lock）
+        const holderFile = join(lockDir, 'holder.json');
+        try {
+          const holder = JSON.parse(readFileSync(holderFile, 'utf-8')) as { pid: number; acquiredAt: string };
+          const age = Date.now() - new Date(holder.acquiredAt).getTime();
+          if (age > LOCK_TIMEOUT_MS) {
+            console.warn(
+              `[fs-utils] Breaking stale lock for ${missionId} (age=${age}ms, holder pid=${holder.pid})`,
+            );
+            try { unlinkSync(holderFile); } catch { /* ignore */ }
+            try { rmdirSync(lockDir); } catch { /* ignore */ }
+            continue; // 重试获取
+          }
+        } catch {
+          // holder.json 读取失败，可能锁目录存在但无 holder 文件（异常状态），尝试破锁
+          try { rmdirSync(lockDir); } catch { /* ignore */ }
+          continue;
+        }
+        // 锁仍有效，等待后重试
+        const sleepMs = Math.min(LOCK_RETRY_INTERVAL_MS, deadline - Date.now());
+        if (sleepMs > 0) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+        }
+        continue;
+      }
+      // 其他非 EEXIST 错误（如权限问题）
+      console.error(`[fs-utils] Failed to acquire lock for ${missionId}:`, err);
+      return null;
+    }
+  }
+
+  console.error(`[fs-utils] Lock timeout for ${missionId} after ${LOCK_TIMEOUT_MS}ms`);
+  return null;
+}
+
+/**
+ * 在文件锁保护下执行操作，确保锁始终被释放（含异常路径）
+ */
+export function withMissionLock<T>(
+  missionsDir: string,
+  missionId: string,
+  fn: () => T,
+): T | null {
+  const lock = acquireMissionLock(missionsDir, missionId);
+  if (!lock) {
+    console.error(`[fs-utils] Could not acquire lock for ${missionId}, skipping operation`);
+    return null;
+  }
+  try {
+    return fn();
+  } finally {
+    lock.release();
+  }
 }

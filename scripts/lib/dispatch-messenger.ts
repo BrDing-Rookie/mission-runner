@@ -11,6 +11,10 @@ import type { Mission, Task } from './types.ts';
 /** 等待 Agent 在群内响应的超时（ms） */
 const MENTION_RESPONSE_TIMEOUT_MS = 15_000;
 
+/** 发送重试配置 */
+export const MENTION_MAX_RETRIES = 2;
+export const MENTION_BASE_DELAY_MS = 1_000;
+
 /**
  * 在群聊中 @ 目标 Agent，发送派发消息。
  *
@@ -47,17 +51,31 @@ export function mentionInDiscord(
 
   const fullMessage = `${message}\n${agentMentionTag}`;
 
-  const result = safeExec(
-    ['openclaw', 'message', 'send', '--account', 'discord-rd-lead', '--channel', channelType, '--target', channelId, '--message', fullMessage],
-    MENTION_RESPONSE_TIMEOUT_MS,
-  );
+  for (let attempt = 0; attempt <= MENTION_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = MENTION_BASE_DELAY_MS * attempt;
+      console.log(`[dispatch-messenger] Retry ${attempt}/${MENTION_MAX_RETRIES} after ${delay}ms`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    }
 
-  if (!result.success) {
-    console.error(`[dispatch-messenger] mentionInDiscord failed: ${result.error}`);
-    return false;
+    const result = safeExec(
+      ['openclaw', 'message', 'send', '--account', 'discord-rd-lead', '--channel', channelType, '--target', channelId, '--message', fullMessage],
+      MENTION_RESPONSE_TIMEOUT_MS,
+    );
+
+    if (result.success) {
+      if (attempt > 0) {
+        console.log(`[dispatch-messenger] mentionInDiscord succeeded on retry ${attempt}`);
+      }
+      console.log(`[dispatch-messenger] sent | channel=${channelId} | agent=${agentMentionTag} | attempts=${attempt + 1}`);
+      return true;
+    }
+
+    console.warn(`[dispatch-messenger] mentionInDiscord attempt ${attempt + 1} failed: ${result.error}`);
   }
 
-  return true;
+  console.error(`[dispatch-messenger] mentionInDiscord failed after ${MENTION_MAX_RETRIES + 1} attempts`);
+  return false;
 }
 
 /**

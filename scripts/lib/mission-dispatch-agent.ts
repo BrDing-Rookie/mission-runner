@@ -89,7 +89,7 @@ export function dispatchTaskToAgent(task: Task, mission: Mission, missionsDir: s
       console.log(`[dispatch-agent] L1 success | taskId=${task.taskId} | agent=${agentId} | sessionKey=${activeSessions[0]!.sessionKey}`);
       return { taskId: task.taskId, dispatchLevel: 1, success: true, agentId, sessionKey: activeSessions[0]!.sessionKey, timestamp };
     }
-    console.error(`[dispatch-agent] L1 mention failed, falling back to L2 | taskId=${task.taskId}`);
+    console.error(`[dispatch-agent] L1 mention failed after retries, falling back to L2 | taskId=${task.taskId}`);
   }
 
   // ── Level 2: 创建 session → 启动后重新 @ ─────────────────────────────────

@@ -5,7 +5,7 @@
  * 在写入前自动检测状态变更并触发通知（fire-and-forget）。
  */
 
-import { appendEvent, safeWriteFile, writeMission } from './fs-utils.ts';
+import { appendEvent, safeWriteFile, withMissionLock, writeMission } from './fs-utils.ts';
 import { resolveMentions } from './mission-notification-mentions.ts';
 import { resolveMissionNotificationAdapter } from './mission-notification.ts';
 import type { TransitionInfo } from './mission-notification-templates.ts';
@@ -115,79 +115,92 @@ function transitionKey(t: TransitionInfo, mission?: Mission): string {
 export function commitMissionUpdate(options: CommitOptions): boolean {
   const { missionsDir, oldMission, newMission, dryRun, source, skipNotification } = options;
 
-  // 将幂等标记写入 newMission
-  const missionToWrite = { ...newMission };
-
-  // 收集需要发送的通知（写入成功后才发送）
-  type PendingNotification = { key: string; transition: TransitionInfo };
-  const pendingNotifications: PendingNotification[] = [];
-
-  if (!dryRun && !skipNotification) {
-    const transitions = detectTransitions(oldMission, newMission);
-    const existingFlags = missionToWrite.flags?.notifiedTransitions ?? {};
-    const newFlags = { ...existingFlags };
-
-    for (const t of transitions) {
-      const key = transitionKey(t, newMission);
-      if (existingFlags[key]) continue; // 已通知过，幂等跳过
-
-      // 1. 先标记幂等 key
-      newFlags[key] = true;
-      pendingNotifications.push({ key, transition: t });
-    }
-
-    missionToWrite.flags = { ...(missionToWrite.flags ?? {}), notifiedTransitions: newFlags };
-  }
-
-  // 2. 校验状态迁移合法性（写入前）
+  // 校验状态迁移合法性（写入前，dryRun 也需要校验）
   if (oldMission.status !== newMission.status) {
     if (!isTransitionAllowed(oldMission.status, newMission.status)) {
       const msg = `Illegal transition: ${oldMission.status} → ${newMission.status} (source: ${source})`;
       console.error(`[mission-commit] ${msg}`);
-      appendEvent(missionsDir, oldMission.missionId, {
-        type: 'illegal_transition_blocked',
-        from: oldMission.status,
-        to: newMission.status,
-        source,
-      });
+      if (!dryRun) {
+        appendEvent(missionsDir, oldMission.missionId, {
+          type: 'illegal_transition_blocked',
+          from: oldMission.status,
+          to: newMission.status,
+          source,
+        });
+      }
       return false;
     }
   }
 
-  // 3. 写入 mission.json（含幂等标记）
-  const writeOk = writeMission(missionsDir, missionToWrite);
-  if (!writeOk) return false;
+  // dryRun 模式：不写入文件，不需要锁
+  if (dryRun) {
+    return true;
+  }
 
-  // 4. 写入成功后 fire-and-forget 发送通知
-  if (pendingNotifications.length > 0) {
-    const adapter = resolveMissionNotificationAdapter();
-    for (const { key, transition } of pendingNotifications) {
-      try {
-        const mentions = resolveMentions(transition, missionToWrite);
-        const payload = buildTransitionPayload(transition, missionToWrite, mentions, source);
-        adapter.send(payload, { mission: missionToWrite, dryRun });
-      } catch (err) {
-        console.error(`[mission-commit] notification failed for ${key}: ${(err as Error).message}`);
+  // 非 dryRun：使用文件锁保护"校验+写入+通知"整段关键区间
+  const writeResult = withMissionLock(missionsDir, oldMission.missionId, () => {
+    // 将幂等标记写入 newMission
+    const missionToWrite = { ...newMission };
+
+    // 收集需要发送的通知（写入成功后才发送）
+    type PendingNotification = { key: string; transition: TransitionInfo };
+    const pendingNotifications: PendingNotification[] = [];
+
+    if (!skipNotification) {
+      const transitions = detectTransitions(oldMission, newMission);
+      const existingFlags = missionToWrite.flags?.notifiedTransitions ?? {};
+      const newFlags = { ...existingFlags };
+
+      for (const t of transitions) {
+        const key = transitionKey(t, newMission);
+        if (existingFlags[key]) continue; // 已通知过，幂等跳过
+
+        // 先标记幂等 key
+        newFlags[key] = true;
+        pendingNotifications.push({ key, transition: t });
+      }
+
+      missionToWrite.flags = { ...(missionToWrite.flags ?? {}), notifiedTransitions: newFlags };
+    }
+
+    // 写入 mission.json（含幂等标记）
+    const writeOk = writeMission(missionsDir, missionToWrite);
+    if (!writeOk) return false;
+
+    // 写入成功后 fire-and-forget 发送通知
+    if (pendingNotifications.length > 0) {
+      const adapter = resolveMissionNotificationAdapter();
+      for (const { key, transition } of pendingNotifications) {
+        try {
+          const mentions = resolveMentions(transition, missionToWrite);
+          const payload = buildTransitionPayload(transition, missionToWrite, mentions, source);
+          adapter.send(payload, { mission: missionToWrite, dryRun });
+        } catch (err) {
+          console.error(`[mission-commit] notification failed for ${key}: ${(err as Error).message}`);
+        }
       }
     }
-  }
 
-  // 写入事件日志
-  const event: Record<string, unknown> = {
-    type: `mission_${source}`,
-    statusFrom: oldMission.status,
-    statusTo: missionToWrite.status,
-    source,
-    ...(options.eventExtras ?? {}),
-  };
-  appendEvent(missionsDir, missionToWrite.missionId, event);
+    // 写入事件日志
+    const event: Record<string, unknown> = {
+      type: `mission_${source}`,
+      statusFrom: oldMission.status,
+      statusTo: missionToWrite.status,
+      source,
+      ...(options.eventExtras ?? {}),
+    };
+    appendEvent(missionsDir, missionToWrite.missionId, event);
 
-  // 写入额外文件
-  if (options.artifactWrites) {
-    for (const artifact of options.artifactWrites) {
-      safeWriteFile(artifact.path, artifact.content);
+    // 写入额外文件
+    if (options.artifactWrites) {
+      for (const artifact of options.artifactWrites) {
+        safeWriteFile(artifact.path, artifact.content);
+      }
     }
-  }
 
-  return true;
+    return true;
+  });
+
+  if (writeResult === null) return false; // 获取锁失败
+  return writeResult;
 }
