@@ -384,6 +384,18 @@ export function classifyCriterion(description: string): 'AUTO' | 'MANUAL' {
 }
 
 /**
+ * Shell metacharacters that could enable injection attacks.
+ * Presence of any of these in a test command causes immediate rejection.
+ */
+const SHELL_META_CHARS = /[;|&$`><]/;
+
+/**
+ * Whitelist pattern for safe test commands.
+ * Only allows: npm test, npm run <script>, npx <pkg>, node <file>
+ */
+const SAFE_COMMAND_PATTERN = /^(npm\s+(test|run\s+[\w:.-]+)|npx\s+[\w@/.:-]+|node\s+[\w/.:-]+)/;
+
+/**
  * Run structural (automated) verification checks.
  *
  * 1. If mission dir has `test-command.txt`, read and execute it → check exit code
@@ -399,22 +411,40 @@ export function structuralVerify(missionsDir: string, mission: Mission): Structu
   if (existsSync(testCommandFile)) {
     const testCommand = readFileSync(testCommandFile, 'utf-8').trim();
     if (testCommand) {
-      let passed = false;
-      let reason = '';
-      try {
-        execFileSync('bash', ['-c', testCommand], {
-          timeout: 120_000,
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-          cwd: join(missionsDir, '..'),  // project root
+      // Security: reject commands containing shell metacharacters
+      if (SHELL_META_CHARS.test(testCommand)) {
+        results.push({
+          criterion: `Test: ${testCommand}`,
+          type: 'AUTO',
+          passed: false,
+          reason: `Blocked: test command contains shell metacharacters (;|&$\`><) which are not permitted`,
         });
-        passed = true;
-        reason = `Test command succeeded: \`${testCommand}\``;
-      } catch (err) {
-        const e = err as { status?: number; stderr?: string };
-        reason = `Test command failed (exit ${e.status ?? 'unknown'}): \`${testCommand}\``;
+      } else if (!SAFE_COMMAND_PATTERN.test(testCommand)) {
+        // Security: reject commands that don't match the safe whitelist
+        results.push({
+          criterion: `Test: ${testCommand}`,
+          type: 'AUTO',
+          passed: false,
+          reason: `Blocked: test command does not match allowed patterns (npm test/run, npx, node)`,
+        });
+      } else {
+        let passed = false;
+        let reason = '';
+        try {
+          execFileSync('bash', ['-c', testCommand], {
+            timeout: 120_000,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: join(missionsDir, '..'),  // project root
+          });
+          passed = true;
+          reason = `Test command succeeded: \`${testCommand}\``;
+        } catch (err) {
+          const e = err as { status?: number; stderr?: string };
+          reason = `Test command failed (exit ${e.status ?? 'unknown'}): \`${testCommand}\``;
+        }
+        results.push({ criterion: `Test: ${testCommand}`, type: 'AUTO', passed, reason });
       }
-      results.push({ criterion: `Test: ${testCommand}`, type: 'AUTO', passed, reason });
     }
   }
 
@@ -522,7 +552,40 @@ export interface VerifyComputed {
   updatedMission: Mission;
 }
 
-export function computeVerification(args: VerifyInput, mission: Mission): VerifyComputed {
+// ── Shared Verification Context ───────────────────────────────────────────────
+
+interface VerifyContext {
+  tasks: Mission['tasks'] extends undefined ? never[] : NonNullable<Mission['tasks']>;
+  completedTasks: number;
+  failedTasks: NonNullable<Mission['tasks']>;
+  pendingTasks: NonNullable<Mission['tasks']>;
+  planText: string | null;
+  completionCriteria: NonNullable<Mission['completionCriteria']>;
+  missionArtifacts: NonNullable<Mission['artifacts']>;
+  nonMetaArtifacts: NonNullable<Mission['artifacts']>;
+  planCriteria: string[];
+  artifactFiles: string[];
+  gaps: string[];
+  criterionContext: {
+    hasPlan: boolean;
+    hasArtifacts: boolean;
+    hasPendingTasks: boolean;
+    hasFailedTasks: boolean;
+    planCriteria: string[];
+    artifactFiles: string[];
+    missionArtifacts: string[];
+    missionsDir: string;
+    missionId: string;
+    taskSummary: string;
+  };
+}
+
+/**
+ * Gather and compute all shared verification inputs.
+ * Called by both computeVerification and computeVerificationWithLlm before
+ * their respective criterion evaluation strategies.
+ */
+function buildVerifyContext(args: VerifyInput, mission: Mission): VerifyContext {
   const tasks = mission.tasks ?? [];
   const completedTasks = tasks.filter((task) => task.status === 'COMPLETED').length;
   const failedTasks = tasks.filter((task) => task.status === 'FAILED');
@@ -531,17 +594,21 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
   const completionCriteria = mission.completionCriteria ?? [];
   const missionArtifacts = mission.artifacts ?? [];
   const nonMetaArtifacts = missionArtifacts.filter((a) => !a.path.endsWith('/plan.md') && a.path !== 'plan.md' && !a.path.endsWith('/verification.md') && a.path !== 'verification.md');
-  const gaps: string[] = [];
 
   const planCriteria = planText ? extractPlanCriteria(planText) : [];
   const artifactFiles = listArtifactFiles(args.missionsDir, mission.missionId);
 
+  const gaps: string[] = [];
   if (!planText) gaps.push('Missing plan.md artifact.');
   if (tasks.length === 0) gaps.push('Mission has no planned tasks.');
   if (pendingTasks.length > 0) gaps.push(`Pending non-terminal tasks: ${pendingTasks.map((task) => `${task.taskId}:${task.status}`).join(', ')}`);
   if (failedTasks.length > 0) gaps.push(`Failed tasks present: ${failedTasks.map((task) => task.taskId).join(', ')}`);
 
-  const criterionResults = completionCriteria.map((criterion) => evaluateCriterion(criterion, {
+  const taskSummary = tasks.length > 0
+    ? tasks.map((t) => `${t.taskId}:${t.status}`).join(', ')
+    : 'no tasks';
+
+  const criterionContext = {
     hasPlan: Boolean(planText),
     hasArtifacts: nonMetaArtifacts.length > 0,
     hasPendingTasks: pendingTasks.length > 0,
@@ -551,8 +618,40 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
     missionArtifacts: missionArtifacts.map((a) => a.path),
     missionsDir: args.missionsDir,
     missionId: mission.missionId,
-  }));
+    taskSummary,
+  };
 
+  return {
+    tasks,
+    completedTasks,
+    failedTasks,
+    pendingTasks,
+    planText,
+    completionCriteria,
+    missionArtifacts,
+    nonMetaArtifacts,
+    planCriteria,
+    artifactFiles,
+    gaps,
+    criterionContext,
+  };
+}
+
+/**
+ * Finalize verification after criterion evaluation is complete.
+ * Shared by computeVerification and computeVerificationWithLlm.
+ */
+function finalizeVerification(
+  args: VerifyInput,
+  mission: Mission,
+  criterionResults: CriterionResult[],
+  ctx: VerifyContext,
+  summaryLlmSuffix = '',
+): VerifyComputed {
+  const { completedTasks, completionCriteria, planCriteria, artifactFiles, gaps } = ctx;
+  const tasks = ctx.tasks;
+
+  // Append criterion-level gaps
   for (const criterion of completionCriteria) {
     if (criterion.required === false) continue;
     const result = criterionResults.find((item) => item.criterionId === criterion.id);
@@ -580,11 +679,12 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
   }
 
   const criteriaPassed = criterionResults.filter((r) => r.passed).length;
+  const llmTag = summaryLlmSuffix ? ` ${summaryLlmSuffix}` : '';
   const verificationSummary = gaps.length === 0
-    ? `Verification passed with ${completedTasks}/${tasks.length} tasks completed and ${criteriaPassed}/${completionCriteria.length} completion criteria satisfied.`
+    ? `Verification passed with ${completedTasks}/${tasks.length} tasks completed and ${criteriaPassed}/${completionCriteria.length} completion criteria satisfied${llmTag}.`
     : iterationLimitReached
       ? `Verification failed permanently: iteration limit ${maxIterations} reached with ${gaps.length} unresolved gap(s).`
-      : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria.`;
+      : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria${llmTag}.`;
 
   // ── Structural verification ───────────────────────────────────────────────
   const structuralChecks = structuralVerify(args.missionsDir, mission);
@@ -641,6 +741,12 @@ export function computeVerification(args: VerifyInput, mission: Mission): Verify
   };
 }
 
+export function computeVerification(args: VerifyInput, mission: Mission): VerifyComputed {
+  const ctx = buildVerifyContext(args, mission);
+  const criterionResults = ctx.completionCriteria.map((criterion) => evaluateCriterion(criterion, ctx.criterionContext));
+  return finalizeVerification(args, mission, criterionResults, ctx);
+}
+
 // ── LLM-Powered Compute Verification ─────────────────────────────────────────
 
 /**
@@ -653,134 +759,14 @@ export async function computeVerificationWithLlm(
   mission: Mission,
   llmClient: LlmClient,
 ): Promise<VerifyComputed> {
-  const tasks = mission.tasks ?? [];
-  const completedTasks = tasks.filter((task) => task.status === 'COMPLETED').length;
-  const failedTasks = tasks.filter((task) => task.status === 'FAILED');
-  const pendingTasks = tasks.filter((task) => !['COMPLETED', 'FAILED', 'SKIPPED'].includes(task.status));
-  const planText = loadTextIfExists(missionPath(args.missionsDir, mission.missionId, 'plan.md'));
-  const completionCriteria = mission.completionCriteria ?? [];
-  const missionArtifacts = mission.artifacts ?? [];
-  const nonMetaArtifacts = missionArtifacts.filter((a) => !a.path.endsWith('/plan.md') && a.path !== 'plan.md' && !a.path.endsWith('/verification.md') && a.path !== 'verification.md');
-  const gaps: string[] = [];
-
-  const planCriteria = planText ? extractPlanCriteria(planText) : [];
-  const artifactFiles = listArtifactFiles(args.missionsDir, mission.missionId);
-
-  if (!planText) gaps.push('Missing plan.md artifact.');
-  if (tasks.length === 0) gaps.push('Mission has no planned tasks.');
-  if (pendingTasks.length > 0) gaps.push(`Pending non-terminal tasks: ${pendingTasks.map((task) => `${task.taskId}:${task.status}`).join(', ')}`);
-  if (failedTasks.length > 0) gaps.push(`Failed tasks present: ${failedTasks.map((task) => task.taskId).join(', ')}`);
-
-  // Build task summary for LLM context
-  const taskSummary = tasks.length > 0
-    ? tasks.map((t) => `${t.taskId}:${t.status}`).join(', ')
-    : 'no tasks';
-
-  // Build shared criterion context
-  const criterionContext = {
-    hasPlan: Boolean(planText),
-    hasArtifacts: nonMetaArtifacts.length > 0,
-    hasPendingTasks: pendingTasks.length > 0,
-    hasFailedTasks: failedTasks.length > 0,
-    planCriteria,
-    artifactFiles,
-    missionArtifacts: missionArtifacts.map((a) => a.path),
-    missionsDir: args.missionsDir,
-    missionId: mission.missionId,
-    taskSummary,
-  };
+  const ctx = buildVerifyContext(args, mission);
 
   // Evaluate criteria serially with LLM
   const criterionResults: CriterionResult[] = [];
-  for (const criterion of completionCriteria) {
-    const result = await evaluateCriterionWithLlm(criterion, criterionContext, llmClient);
+  for (const criterion of ctx.completionCriteria) {
+    const result = await evaluateCriterionWithLlm(criterion, ctx.criterionContext, llmClient);
     criterionResults.push(result);
   }
 
-  for (const criterion of completionCriteria) {
-    if (criterion.required === false) continue;
-    const result = criterionResults.find((item) => item.criterionId === criterion.id);
-    if (result && !result.passed) {
-      gaps.push(`Completion criterion ${criterion.id} not satisfied: ${result.reason}`);
-    }
-  }
-
-  if (planCriteria.length > completionCriteria.length) {
-    gaps.push(`Plan.md defines ${planCriteria.length} completion criteria but mission has only ${completionCriteria.length}; consider updating mission completionCriteria.`);
-  }
-
-  const currentIteration = mission.currentIteration ?? 0;
-  const maxIterations = mission.maxIterations ?? Number.MAX_SAFE_INTEGER;
-  const iterationLimitReached = gaps.length > 0 && currentIteration >= maxIterations;
-
-  const verificationStatus: VerificationStatus = gaps.length === 0
-    ? 'PASS'
-    : iterationLimitReached
-      ? 'NONRETRYABLE_FAILURE'
-      : 'RETRYABLE_GAP';
-
-  if (iterationLimitReached) {
-    gaps.push(`Max iterations reached (${currentIteration}/${maxIterations}); mission cannot retry further.`);
-  }
-
-  const criteriaPassed = criterionResults.filter((r) => r.passed).length;
-  const verificationSummary = gaps.length === 0
-    ? `Verification passed with ${completedTasks}/${tasks.length} tasks completed and ${criteriaPassed}/${completionCriteria.length} completion criteria satisfied (LLM-evaluated).`
-    : iterationLimitReached
-      ? `Verification failed permanently: iteration limit ${maxIterations} reached with ${gaps.length} unresolved gap(s).`
-      : `Verification found ${gaps.length} gap(s); completed ${completedTasks}/${tasks.length} tasks and satisfied ${criteriaPassed}/${completionCriteria.length} completion criteria (LLM-evaluated).`;
-
-  // ── Structural verification ───────────────────────────────────────────────
-  const structuralChecks = structuralVerify(args.missionsDir, mission);
-
-  const now = new Date().toISOString();
-  const verificationFile = missionPath(args.missionsDir, mission.missionId, 'verification.md');
-
-  const verificationMarkdown = buildVerificationMarkdown(
-    mission, verificationStatus, verificationSummary,
-    criterionResults, completionCriteria, planCriteria, artifactFiles, gaps,
-    currentIteration, maxIterations, completedTasks, tasks.length,
-    structuralChecks,
-  );
-
-  // In auto-only mode, don't change mission status
-  if (args.autoOnly) {
-    return {
-      mission,
-      verificationStatus,
-      missionStatus: mission.status,
-      gaps,
-      criteriaResults: criterionResults,
-      structuralChecks,
-      verificationMarkdown,
-      verificationFile,
-      updatedMission: mission,
-    };
-  }
-
-  const newMissionStatus: MissionStatus = verificationStatus === 'PASS'
-    ? 'COMPLETED'
-    : verificationStatus === 'NONRETRYABLE_FAILURE'
-      ? 'FAILED'
-      : 'ITERATING';
-
-  const verifiedMission = setVerification(mission, { status: verificationStatus, summary: verificationSummary, gaps, criteriaResults: criterionResults });
-  const updatedMission = {
-    ...setMissionStatus(verifiedMission, newMissionStatus),
-    artifacts: upsertArtifact(verifiedMission.artifacts, { path: `missions/${mission.missionId}/verification.md`, type: 'summary' as const, description: 'Verification result summary', generatedAt: now }),
-    nextWakeAt: verificationStatus === 'PASS' || verificationStatus === 'NONRETRYABLE_FAILURE' ? null : now,
-    currentIteration: verificationStatus === 'RETRYABLE_GAP' ? currentIteration + 1 : currentIteration,
-  };
-
-  return {
-    mission,
-    verificationStatus,
-    missionStatus: newMissionStatus,
-    gaps,
-    criteriaResults: criterionResults,
-    structuralChecks,
-    verificationMarkdown,
-    verificationFile,
-    updatedMission,
-  };
+  return finalizeVerification(args, mission, criterionResults, ctx, '(LLM-evaluated)');
 }

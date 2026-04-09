@@ -3,9 +3,10 @@
 import { pathToFileURL } from 'url';
 import { commitMissionUpdate as commitUpdate } from './lib/mission-commit.ts';
 import { nowIso, parseMissionCliArgs, requireMission } from './lib/mission-helpers.ts';
+import { TERMINAL_TASK_STATUSES } from './lib/types.ts';
 import type { BackgroundProcess, Mission, Task } from './lib/types.ts';
 
-const TERMINAL_TASK_STATUSES = new Set(['COMPLETED', 'FAILED', 'SKIPPED']);
+const TERMINAL_TASK_STATUSES_SET = new Set(TERMINAL_TASK_STATUSES);
 const RECONCILABLE_PROCESS_STATUSES = new Set<BackgroundProcess['status']>(['COMPLETED', 'FAILED', 'TIMEOUT']);
 
 const DEFAULT_PROCESS_TIMEOUT_MS = 3_600_000; // 1 hour
@@ -42,7 +43,7 @@ function deriveMissionStatus(mission: Mission, tasks: Task[], backgroundProcesse
     return 'RUNNING';
   }
 
-  if (tasks.length > 0 && tasks.every((task) => TERMINAL_TASK_STATUSES.has(task.status))) {
+  if (tasks.length > 0 && tasks.every((task) => TERMINAL_TASK_STATUSES_SET.has(task.status))) {
     return 'VERIFYING';
   }
 

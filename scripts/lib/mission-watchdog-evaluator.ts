@@ -8,6 +8,7 @@
 import {
   ACTIVE_STATUSES,
   TERMINAL_STATUSES,
+  TERMINAL_TASK_STATUSES,
   type BackgroundProcess,
   type Mission,
   type MissionAction,
@@ -32,7 +33,7 @@ function isoAt(timestampMs: number): string {
 }
 
 function isTaskTerminal(task: Task): boolean {
-  return ['COMPLETED', 'FAILED', 'SKIPPED'].includes(task.status);
+  return TERMINAL_TASK_STATUSES.includes(task.status);
 }
 
 function hasRemainingRetry(task: Task): boolean {

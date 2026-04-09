@@ -56,14 +56,22 @@ function captureStdout(fn: () => number): { exitCode: number; logs: string[] } {
   try { return { exitCode: fn(), logs }; } finally { console.log = originalLog; }
 }
 
+async function captureStdoutAsync(fn: () => Promise<number>): Promise<{ exitCode: number; logs: string[] }> {
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...parts: unknown[]) => { logs.push(parts.map((part) => String(part)).join(' ')); };
+  try { return { exitCode: await fn(), logs }; } finally { console.log = originalLog; }
+}
+
 function buildConfig(missionsDir: string, dryRun: boolean): WatchdogConfig {
   return { ...DEFAULT_WATCHDOG_CONFIG, missionsDir, dryRun };
 }
 
-function orchestrateSingleMission(args: OrchestrateArgs): { exitCode: number; result: Record<string, unknown> } {
+async function orchestrateSingleMission(args: OrchestrateArgs): Promise<{ exitCode: number; result: Record<string, unknown> }> {
   const executed: ExecutedStep[] = [];
   const decisions: Array<{ step: number; action: MissionAction; reason: string }> = [];
   let dispatchTriggered = false;
+  let lastMission: ReturnType<typeof readMission> = null;
 
   for (let step = 1; step <= args.maxSteps; step += 1) {
     const mission = readMission(args.missionsDir, args.missionId);
@@ -77,13 +85,17 @@ function orchestrateSingleMission(args: OrchestrateArgs): { exitCode: number; re
     decisions.push({ step, action: decision.action, reason: decision.reason });
     let progressedThisStep = false;
 
-    if (['CHECK_BACKGROUND', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'].includes(decision.action)) {
-      const actionRun = captureStdout(() => runActionMain([
+    if (['CHECK_BACKGROUND', 'COLLECT_RESULTS', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'ESCALATE_MAX_RETRY', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'].includes(decision.action)) {
+      const actionArgv = [
         '--missions-dir', args.missionsDir,
         '--mission-id', args.missionId,
         '--action', decision.action,
         ...(args.dryRun ? ['--dry-run'] : []),
-      ]));
+      ];
+      if (decision.relatedTaskIds && decision.relatedTaskIds.length > 0) {
+        actionArgv.push('--task-ids', decision.relatedTaskIds.join(','));
+      }
+      const actionRun = captureStdout(() => runActionMain(actionArgv));
       executed.push({ action: decision.action, exitCode: actionRun.exitCode });
       if (actionRun.exitCode !== 0) {
         if (args.verbose) actionRun.logs.forEach((line) => console.error(line));
@@ -94,9 +106,10 @@ function orchestrateSingleMission(args: OrchestrateArgs): { exitCode: number; re
     }
 
     const postActionMission = readMission(args.missionsDir, args.missionId) ?? mission;
+    lastMission = postActionMission;
     const readyTasks = (postActionMission.tasks ?? []).filter((task) => task.status === 'READY');
     if (readyTasks.length > 0 && ['PLANNED', 'RUNNING', 'ITERATING', 'WAITING_EXTERNAL'].includes(postActionMission.status)) {
-      const dispatchRun = captureStdout(() => dispatchMain([
+      const dispatchRun = await captureStdoutAsync(() => dispatchMain([
         '--missions-dir', args.missionsDir,
         '--mission-id', args.missionId,
         ...(args.dryRun ? ['--dry-run'] : []),
@@ -114,7 +127,7 @@ function orchestrateSingleMission(args: OrchestrateArgs): { exitCode: number; re
     if (!progressedThisStep) break;
   }
 
-  const finalMission = readMission(args.missionsDir, args.missionId);
+  const finalMission = lastMission ?? readMission(args.missionsDir, args.missionId);
   if (!args.dryRun) {
     appendEvent(args.missionsDir, args.missionId, {
       type: 'mission_orchestrated',
@@ -173,7 +186,7 @@ async function runAutoMode(args: OrchestrateArgs): Promise<number> {
           }
           totalActive += 1;
           const singleArgs: OrchestrateArgs = { ...args, missionId };
-          const { result } = orchestrateSingleMission(singleArgs);
+          const { result } = await orchestrateSingleMission(singleArgs);
           missionResults.push(result);
         } catch (err) {
           // Per-mission error isolation: log and continue to next mission
@@ -206,23 +219,15 @@ async function runAutoMode(args: OrchestrateArgs): Promise<number> {
   return 0;
 }
 
-export function main(argv: string[] = process.argv.slice(2)): number {
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const args = parseArgs(argv);
 
     if (args.auto) {
-      // auto mode is async — run it and return 0 immediately when called synchronously
-      // For CLI usage the process will stay alive until the async function resolves
-      const promise = runAutoMode(args);
-      promise.then((code) => { process.exitCode = code; }).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[mission-orchestrate] auto error | ${message}`);
-        process.exitCode = 1;
-      });
-      return 0;
+      return runAutoMode(args);
     }
 
-    const { exitCode, result } = orchestrateSingleMission(args);
+    const { exitCode, result } = await orchestrateSingleMission(args);
     if (exitCode !== 0) return exitCode;
     console.log(JSON.stringify(result, null, 2));
     return 0;
@@ -234,4 +239,9 @@ export function main(argv: string[] = process.argv.slice(2)): number {
 }
 
 const isEntrypoint = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isEntrypoint) process.exitCode = main();
+if (isEntrypoint) {
+  main().then((code) => { process.exitCode = code; }).catch((err) => {
+    console.error(`[mission-orchestrate] error | ${(err as Error).message}`);
+    process.exitCode = 1;
+  });
+}

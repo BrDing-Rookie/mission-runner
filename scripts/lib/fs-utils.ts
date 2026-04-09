@@ -235,6 +235,10 @@ export function acquireMissionLock(missionsDir: string, missionId: string): Lock
           continue;
         }
         // 锁仍有效，等待后重试
+        // NOTE: 此处必须使用 Atomics.wait（同步阻塞）而非 async/await。
+        // acquireMissionLock 是同步函数，其调用链（withMissionLock → commitMissionUpdate）
+        // 全为同步上下文，无法引入 async。改为 async 会产生大量连锁改动并破坏多处禁改文件。
+        // 此处 sleepMs 最大 50ms，阻塞时间极短，对事件循环影响可接受。
         const sleepMs = Math.min(LOCK_RETRY_INTERVAL_MS, deadline - Date.now());
         if (sleepMs > 0) {
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);

@@ -36,7 +36,7 @@ function parseDispatchCliArgs(argv: string[]): DispatchCliArgs {
     if (arg === '--auto-spawn') {
       args.autoSpawn = true;
     } else if (arg === '--agent-map' && next) {
-      try { args.agentMap = { ...DEFAULT_AGENT_MAP, ...JSON.parse(next) }; } catch { /* ignore */ }
+      try { args.agentMap = { ...DEFAULT_AGENT_MAP, ...JSON.parse(next) }; } catch (e) { console.warn('[mission-dispatch] agent map parse failed:', e instanceof Error ? e.message : e); }
       i += 1;
     } else if (arg === '--timeout-seconds' && next) {
       const value = Number(next);
@@ -49,7 +49,7 @@ function parseDispatchCliArgs(argv: string[]): DispatchCliArgs {
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-export function main(argv: string[] = process.argv.slice(2)): number {
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   try {
     const args = parseDispatchCliArgs(argv);
     const mission = requireMission(args);
@@ -60,7 +60,7 @@ export function main(argv: string[] = process.argv.slice(2)): number {
       return 0;
     }
 
-    const dispatchResult = dispatchReadyTasks(mission, {
+    const dispatchResult = await dispatchReadyTasks(mission, {
       missionsDir: args.missionsDir,
       autoSpawn: args.autoSpawn,
       agentMap: args.agentMap,
@@ -139,5 +139,8 @@ const isEntrypoint = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isEntrypoint) {
-  process.exitCode = main();
+  main().then((code) => { process.exitCode = code; }).catch((err) => {
+    console.error(`[mission-dispatch] error | ${(err as Error).message}`);
+    process.exitCode = 1;
+  });
 }

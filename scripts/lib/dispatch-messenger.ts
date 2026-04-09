@@ -5,11 +5,10 @@
  * the dispatch message content with task details and callback instructions.
  */
 
-import { safeExec } from './safe-exec.ts';
+import type { RuntimeAdapter } from './runtime-adapter.ts';
+import type { ChannelAdapter } from './channel.ts';
 import type { Mission, Task } from './types.ts';
-
-/** 等待 Agent 在群内响应的超时（ms） */
-const MENTION_RESPONSE_TIMEOUT_MS = 15_000;
+import { PROJECT_ROOT } from './config.ts';
 
 /** 发送重试配置 */
 export const MENTION_MAX_RETRIES = 2;
@@ -18,20 +17,25 @@ export const MENTION_BASE_DELAY_MS = 1_000;
 /**
  * 在群聊中 @ 目标 Agent，发送派发消息。
  *
- * 通过 `openclaw message send` 在指定 channel 中发送包含 @mention 的消息。
+ * 当提供 channel 时，通过 channel.send() 发送（带 mentions）；
+ * 否则通过 RuntimeAdapter.sendMessage 在指定 channel 中发送包含 @mention 的消息。
  *
  * @param agentMentionTag - Agent 的 @mention 标记（如 Discord 的 `<@botUserId>`）
  * @param channelId - 群聊 channel ID
  * @param message - 派发消息内容
+ * @param runtime - RuntimeAdapter 实例
  * @param channelType - 渠道类型（默认 "discord"）
+ * @param channel - 可选的 ChannelAdapter（提供时优先使用）
  * @returns 是否发送成功
  */
-export function mentionInDiscord(
+export async function mentionInDiscord(
   agentMentionTag: string,
   channelId: string,
   message: string,
+  runtime: RuntimeAdapter,
   channelType: string = 'discord',
-): boolean {
+  channel?: ChannelAdapter,
+): Promise<boolean> {
   if (!agentMentionTag || !channelId || !message) {
     console.error('[dispatch-messenger] mentionInDiscord: missing required params');
     return false;
@@ -49,21 +53,37 @@ export function mentionInDiscord(
     return false;
   }
 
+  // 通过 ChannelAdapter 发送（当提供时）
+  if (channel) {
+    const result = await channel.send(
+      { channel: channelType, targetId: channelId },
+      { content: message, mentions: [agentMentionTag] },
+    );
+    if (result.success) {
+      console.log(`[dispatch-messenger] sent via channel | channel=${channelId} | agent=${agentMentionTag}`);
+    } else {
+      console.warn(`[dispatch-messenger] mentionInDiscord via channel failed: ${result.error ?? 'unknown'}`);
+    }
+    return result.success;
+  }
+
   const fullMessage = `${message}\n${agentMentionTag}`;
 
   for (let attempt = 0; attempt <= MENTION_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       const delay = MENTION_BASE_DELAY_MS * attempt;
       console.log(`[dispatch-messenger] Retry ${attempt}/${MENTION_MAX_RETRIES} after ${delay}ms`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      await new Promise<void>(resolve => setTimeout(resolve, delay));
     }
 
-    const result = safeExec(
-      ['openclaw', 'message', 'send', '--account', 'discord-rd-lead', '--channel', channelType, '--target', channelId, '--message', fullMessage],
-      MENTION_RESPONSE_TIMEOUT_MS,
-    );
+    const success = await runtime.sendMessage({
+      channel: channelType,
+      target: channelId,
+      message: fullMessage,
+      account: 'discord-rd-lead',
+    });
 
-    if (result.success) {
+    if (success) {
       if (attempt > 0) {
         console.log(`[dispatch-messenger] mentionInDiscord succeeded on retry ${attempt}`);
       }
@@ -71,7 +91,7 @@ export function mentionInDiscord(
       return true;
     }
 
-    console.warn(`[dispatch-messenger] mentionInDiscord attempt ${attempt + 1} failed: ${result.error}`);
+    console.warn(`[dispatch-messenger] mentionInDiscord attempt ${attempt + 1} failed`);
   }
 
   console.error(`[dispatch-messenger] mentionInDiscord failed after ${MENTION_MAX_RETRIES + 1} attempts`);
@@ -89,7 +109,7 @@ export function buildDispatchMessage(task: Task, mission: Mission, missionsDir: 
   const agentId = task.agent ?? (task.config?.agentId as string | undefined) ?? 'unknown';
 
   // Build the absolute task-update command so the agent can copy-paste & execute
-  const projectDir = '/home/ubuntu/public-deliverables/mission-runner';
+  const projectDir = PROJECT_ROOT;
   const taskUpdateCmd = [
     `cd ${projectDir} && npx tsx scripts/task-update.ts`,
     `--missions-dir ${missionsDir}`,

@@ -140,7 +140,7 @@ export function derivePhaseFromTask(task: Task): TaskPhase {
 
 // ==================== Parallel / Serial / JSON Task Builders ====================
 
-function slugify(value: string): string {
+export function slugify(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')

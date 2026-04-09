@@ -11,7 +11,8 @@ import { resolveMissionNotificationAdapter } from './mission-notification.ts';
 import type { TransitionInfo } from './mission-notification-templates.ts';
 import { buildTransitionPayload } from './mission-notification-templates.ts';
 import type { Mission, TaskStatus } from './types.ts';
-import { isTransitionAllowed } from './types.ts';
+import { isTaskTransitionAllowed, isTransitionAllowed } from './types.ts';
+import type { MissionEventBus } from './event-bus.ts';
 
 export interface CommitOptions {
   missionsDir: string;
@@ -24,6 +25,12 @@ export interface CommitOptions {
   eventExtras?: Record<string, unknown>;
   /** 额外的文件写入 */
   artifactWrites?: Array<{ path: string; content: string }>;
+  /**
+   * 可选的事件总线注入。
+   * 若提供，commitMissionUpdate 会在状态变更时发射相应事件。
+   * 不提供时行为与原来完全相同（不破坏现有调用链路）。
+   */
+  eventBus?: MissionEventBus;
 }
 
 /**
@@ -49,6 +56,13 @@ export function detectTransitions(oldMission: Mission, newMission: Mission): Tra
     const newStatus = newTask.status;
 
     if (oldStatus === newStatus) continue;
+
+    // task 状态迁移合法性校验（warn-only，不阻断写入）
+    if (oldStatus !== undefined && !isTaskTransitionAllowed(oldStatus, newStatus)) {
+      console.warn(
+        `[mission-commit] illegal task transition | taskId=${newTask.taskId} | ${oldStatus} -> ${newStatus}`
+      );
+    }
 
     // task 分发：READY/PENDING → RUNNING 或 WAITING_BACKGROUND
     if (isDispatchTransition(oldStatus, newStatus)) {
@@ -111,9 +125,10 @@ function transitionKey(t: TransitionInfo, mission?: Mission): string {
  * 集中式变更提交：写入 mission.json + 检测变更 + 发送通知。
  *
  * 通知失败不阻塞 mission 推进（fire-and-forget）。
+ * 若提供 eventBus，会在状态变更和 task 完成时发射相应事件。
  */
 export function commitMissionUpdate(options: CommitOptions): boolean {
-  const { missionsDir, oldMission, newMission, dryRun, source, skipNotification } = options;
+  const { missionsDir, oldMission, newMission, dryRun, source, skipNotification, eventBus } = options;
 
   // 校验状态迁移合法性（写入前，dryRun 也需要校验）
   if (oldMission.status !== newMission.status) {
@@ -195,6 +210,40 @@ export function commitMissionUpdate(options: CommitOptions): boolean {
     if (options.artifactWrites) {
       for (const artifact of options.artifactWrites) {
         safeWriteFile(artifact.path, artifact.content);
+      }
+    }
+
+    // 写入成功后发射事件总线事件（可选，不破坏现有调用链路）
+    if (eventBus) {
+      // 发射 mission 状态变更事件
+      if (oldMission.status !== missionToWrite.status) {
+        eventBus.emit({
+          type: 'mission:state-changed',
+          missionId: missionToWrite.missionId,
+          from: oldMission.status,
+          to: missionToWrite.status,
+        });
+      }
+
+      // 发射 task 完成/失败事件
+      const oldTasks = new Map((oldMission.tasks ?? []).map((t) => [t.taskId, t]));
+      for (const newTask of missionToWrite.tasks ?? []) {
+        const oldTask = oldTasks.get(newTask.taskId);
+        if (!oldTask) continue;
+
+        if (newTask.status === 'COMPLETED' && oldTask.status !== 'COMPLETED') {
+          eventBus.emit({
+            type: 'task:completed',
+            missionId: missionToWrite.missionId,
+            taskId: newTask.taskId,
+          });
+        } else if (newTask.status === 'FAILED' && oldTask.status !== 'FAILED') {
+          eventBus.emit({
+            type: 'task:failed',
+            missionId: missionToWrite.missionId,
+            taskId: newTask.taskId,
+          });
+        }
       }
     }
 

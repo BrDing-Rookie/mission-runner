@@ -10,6 +10,7 @@ import { join } from 'path';
 import { commitMissionUpdate } from './mission-commit.ts';
 import { deriveMissionStatus, nowIso, requireMission } from './mission-helpers.ts';
 import { buildMissionNotificationPayload, resolveMissionNotificationAdapter } from './mission-notification.ts';
+import { TERMINAL_TASK_STATUSES } from './types.ts';
 import type { Mission, Task, TaskStatus } from './types.ts';
 
 // ── Retry ──────────────────────────────────────────────────────────────────────
@@ -216,7 +217,7 @@ export function collectResults(
   const collectedTaskIds: string[] = [];
   const noResultTaskIds: string[] = [];
 
-  const TERMINAL_STATUSES: Set<TaskStatus> = new Set(['COMPLETED', 'FAILED', 'SKIPPED']);
+  const TERMINAL_STATUSES: Set<TaskStatus> = new Set(TERMINAL_TASK_STATUSES);
   const DEPENDENCY_DONE_STATUSES: Set<TaskStatus> = new Set(['COMPLETED', 'SKIPPED']);
 
   const updatedTasks: Task[] = (mission.tasks ?? []).map((task): Task => {

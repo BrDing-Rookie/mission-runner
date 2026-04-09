@@ -15,6 +15,7 @@
 import { pathToFileURL } from 'url';
 import { commitMissionUpdate } from './lib/mission-commit.ts';
 import { aggregateUsage, deriveMissionStatus, nowIso, requireMission } from './lib/mission-helpers.ts';
+import { TERMINAL_TASK_STATUSES } from './lib/types.ts';
 import type { Mission, Task, TaskStatus } from './lib/types.ts';
 
 // ==================== CLI Arg Parsing ====================
@@ -36,7 +37,7 @@ interface TaskUpdateCliArgs {
 }
 
 const ALLOWED_REPORT_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED']);
-const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED', 'SKIPPED']);
+const TERMINAL_TASK_STATUSES_SET = new Set<TaskStatus>(TERMINAL_TASK_STATUSES);
 
 function parseTaskUpdateArgs(argv: string[]): TaskUpdateCliArgs {
   const args: TaskUpdateCliArgs = {
@@ -211,7 +212,7 @@ export function updateTask(args: TaskUpdateCliArgs): TaskUpdateResult {
   }
 
   // Don't allow updating terminal tasks
-  if (TERMINAL_TASK_STATUSES.has(task.status)) {
+  if (TERMINAL_TASK_STATUSES_SET.has(task.status)) {
     console.log(`[task-update] noop | missionId=${args.missionId} | taskId=${args.taskId} | reason=task already terminal (${task.status})`);
     return {
       missionId: args.missionId,

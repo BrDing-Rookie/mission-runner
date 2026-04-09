@@ -24,13 +24,8 @@ export interface PlannedOutput {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-export function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24) || 'task';
-}
+import { slugify } from './mission-helpers.ts';
+export { slugify };
 
 export function createTask(taskId: string, title: string, type: TaskType, description: string, priority: number, dependsOn: string[] = []): Task {
   return {

@@ -9,7 +9,7 @@ import { runVerify } from './mission-verify.ts';
 import { main as resumeMain } from './mission-resume.ts';
 import type { MissionAction } from './lib/types.ts';
 
-const SUPPORTED_ACTIONS: MissionAction[] = ['CHECK_BACKGROUND', 'COLLECT_RESULTS', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'];
+const SUPPORTED_ACTIONS: MissionAction[] = ['CHECK_BACKGROUND', 'COLLECT_RESULTS', 'TRIGGER_VERIFY', 'RESUME_TASK', 'RETRY_TASK', 'ESCALATE_STUCK', 'ESCALATE_MAX_RETRY', 'NOTIFY_COMPLETE', 'NOTIFY_ESCALATION'];
 
 function isResumeSummaryChanged(summary: string): boolean {
   return /\| resumed=(?!none)|\| unlocked=(?!none)/.test(summary);
@@ -121,6 +121,20 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     // ── ESCALATE_STUCK ──────────────────────────────────────────────────────
     if (args.action === 'ESCALATE_STUCK') {
       const result = setEscalationState(args.missionsDir, args.missionId, args.dryRun, 'WARNING', 'Mission is stuck and needs human intervention.');
+      if (!args.dryRun && result.changed) {
+        const eventOk = appendEvent(args.missionsDir, result.missionId, {
+          type: 'mission_action_executed', action: args.action, missionStatus: result.missionStatus,
+          escalationReason: result.escalationReason, success: result.success, changed: result.changed, dryRun: args.dryRun,
+        });
+        if (!eventOk) { console.error(`[mission-run-action] failed | missionId=${result.missionId} | action=${args.action} | event=false`); return 1; }
+      }
+      console.log(JSON.stringify(result, null, 2));
+      return result.success ? 0 : 1;
+    }
+
+    // ── ESCALATE_MAX_RETRY ────────────────────────────────────────────────────
+    if (args.action === 'ESCALATE_MAX_RETRY') {
+      const result = setEscalationState(args.missionsDir, args.missionId, args.dryRun, 'CRITICAL', 'Mission has exhausted all retry attempts.');
       if (!args.dryRun && result.changed) {
         const eventOk = appendEvent(args.missionsDir, result.missionId, {
           type: 'mission_action_executed', action: args.action, missionStatus: result.missionStatus,

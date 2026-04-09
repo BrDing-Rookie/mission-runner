@@ -51,6 +51,31 @@ export type TaskStatus =
   | 'FAILED'
   | 'SKIPPED';
 
+/** Task 终态列表：处于这些状态的 task 不再接受状态迁移（FAILED 可重试除外） */
+export const TERMINAL_TASK_STATUSES: TaskStatus[] = ['COMPLETED', 'FAILED', 'SKIPPED'];
+
+/** 允许的 Task 状态迁移映射 */
+export const ALLOWED_TASK_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  PENDING: ['READY', 'SKIPPED'],
+  READY: ['RUNNING', 'SKIPPED'],
+  RUNNING: ['COMPLETED', 'FAILED', 'WAITING_BACKGROUND', 'BLOCKED', 'SKIPPED'],
+  WAITING_BACKGROUND: ['RUNNING', 'COMPLETED', 'FAILED'],
+  BLOCKED: ['READY', 'RUNNING', 'SKIPPED', 'FAILED'],
+  COMPLETED: [],   // 终态，不允许迁移
+  FAILED: ['READY'], // 可重试
+  SKIPPED: [],     // 终态
+};
+
+/**
+ * 检查 task 状态迁移是否允许。
+ * from === to 视为幂等，始终返回 true。
+ */
+export function isTaskTransitionAllowed(from: TaskStatus, to: TaskStatus): boolean {
+  if (from === to) return true;
+  const allowed = ALLOWED_TASK_TRANSITIONS[from];
+  return allowed ? allowed.includes(to) : false;
+}
+
 export type TaskType =
   | 'research'
   | 'analysis'
